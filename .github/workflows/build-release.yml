@@ -56,10 +56,51 @@ jobs:
           }
           exit 0
 
+      - name: 解析工具链路径
+        id: toolchain
+        if: steps.check.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          # Build-Game.ps1 对新的构建目录要求显式给出 Microsoft 头库/CRT、SDK 与 ABI 版本，
+          # 它本身不安装也不猜测工具链。运行器上这些组件都在，只是需要用 vswhere 解析出路径。
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere)) { throw 'vswhere.exe 不存在，无法定位 Visual Studio 的 C++ 工具。' }
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw '未找到带 C++ 工具的 Visual Studio 实例。' }
+
+          $msvc = Get-ChildItem -LiteralPath (Join-Path $vs 'VC\Tools\MSVC') -Directory |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $msvc) { throw '未找到 MSVC 工具集目录。' }
+          $cl = Join-Path $msvc.FullName 'bin\Hostx64\x64\cl.exe'
+          if (-not (Test-Path -LiteralPath $cl)) { throw "未找到 cl.exe：$cl" }
+          # ABI 兼容版本取 cl.exe 的 19.xx.yyyyy，与工具集目录名（14.xx.yyyyy）不是同一个号段。
+          $compat = ((Get-Item -LiteralPath $cl).VersionInfo.FileVersion -split '\.')[0..2] -join '.'
+
+          $sdkRoot = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10'
+          $sdk = Get-ChildItem -LiteralPath (Join-Path $sdkRoot 'Include') -Directory |
+            Where-Object Name -match '^10\.' | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $sdk) { throw '未找到 Windows SDK。' }
+
+          $llvm = 'C:\Program Files\LLVM'
+          if (-not (Test-Path -LiteralPath (Join-Path $llvm 'bin\clang-cl.exe'))) { throw '未找到 LLVM/clang-cl。' }
+
+          "msvc=$($msvc.FullName)" >> $env:GITHUB_OUTPUT
+          "sdkRoot=$sdkRoot"        >> $env:GITHUB_OUTPUT
+          "sdkVersion=$($sdk.Name)" >> $env:GITHUB_OUTPUT
+          "compat=$compat"          >> $env:GITHUB_OUTPUT
+          "llvm=$llvm"              >> $env:GITHUB_OUTPUT
+          Write-Host "MSVC=$($msvc.FullName)`nSDK=$sdkRoot\$($sdk.Name)`nABI=$compat`nLLVM=$llvm"
+
       - name: 编译 Release x64
         if: steps.check.outputs.exists != 'true'
         shell: pwsh
-        run: ./tools/Build-Game.ps1
+        run: |
+          ./tools/Build-Game.ps1 `
+            -MSVCRoot "${{ steps.toolchain.outputs.msvc }}" `
+            -WindowsSDKRoot "${{ steps.toolchain.outputs.sdkRoot }}" `
+            -WindowsSDKVersion "${{ steps.toolchain.outputs.sdkVersion }}" `
+            -MSVCCompatibilityVersion "${{ steps.toolchain.outputs.compat }}" `
+            -LLVMRoot "${{ steps.toolchain.outputs.llvm }}"
 
       - name: 打包
         id: package
