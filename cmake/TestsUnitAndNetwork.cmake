@@ -1,3 +1,49 @@
+if(CONCORD_PORTABLE_CORE)
+    include("${CMAKE_CURRENT_LIST_DIR}/CoreTests.cmake")
+    return()
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/ProcessPerformanceContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/TimerResolutionContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/HostLoopContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/AudioDiagnosticContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/VoicePcmLifetimeContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SpriteHitSpanContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SpriteFrameValueContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/StructureGeometryValueContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/RenderColorValueContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/RadarCellValueContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/RadarPixelStoreContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MapDrawingContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/AuxiliaryShpDrawingContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ScreenShakeDrawingContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/RenderPlacementValueContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MobileProbeValueContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/HitSpanPointQueryContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/GeometryScopeViewportContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/WorldPlacementViewportContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/BodyAnchorQueryContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ProjectileScreenQueryContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/BuildingVisibleViewportContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/StructureQueryPointContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/TurretOffsetReturnContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MobilePrivateContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/StartupRecoveryPromptContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MainMenuControllerContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/CampaignMenuControllerContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/LanMenuControllerContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/InternetMenuControllerContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/PersistentMenuParentContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/RecoilPrivateContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MapSurfacePickContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/InfantryMuzzleQueryContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MarineMuzzleQueryContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/StructureMuzzleQueryContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/VoxelMuzzleQueryContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SpawnedMissileBoundsQueryContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ObjectShpBoundsQueryContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MobileSpriteBoundsQueryContracts.cmake")
+
 add_test(
     NAME map_data_health_aircraft_smoke_test
     COMMAND concord_map_data_smoke
@@ -14,6 +60,66 @@ add_test(
     NAME campaign_progress_smoke_test
     COMMAND concord_campaign_progress_smoke
 )
+
+add_test(NAME input_pixel_values_contract_test COMMAND concord_input_pixel_values_contract)
+set_tests_properties(input_pixel_values_contract_test
+    PROPERTIES TIMEOUT 30 LABELS "no-assets;platform-values;input-pixel-values")
+if(TARGET concord_input_pixel_values_win32_reference)
+    add_test(NAME input_pixel_values_win32_reference_test COMMAND concord_input_pixel_values_win32_reference)
+    set_tests_properties(input_pixel_values_win32_reference_test
+        PROPERTIES TIMEOUT 30 LABELS "no-assets;platform-values;input-pixel-values;windows-reference")
+endif()
+
+add_test(NAME player_defeat_notice_contract_test COMMAND concord_player_defeat_notice_contract)
+set_tests_properties(player_defeat_notice_contract_test
+    PROPERTIES TIMEOUT 30 LABELS "no-assets;platform-values;local-presentation-time")
+
+add_test(NAME csf_codec_contract_test COMMAND concord_csf_codec_contract)
+set_tests_properties(csf_codec_contract_test
+    PROPERTIES TIMEOUT 30 LABELS "no-assets;csf-codec-contract")
+
+add_test(NAME pal_decoder_contract_test COMMAND concord_pal_decoder_contract)
+set_tests_properties(pal_decoder_contract_test
+    PROPERTIES TIMEOUT 30 LABELS "no-assets;pal-codec")
+if(EXISTS "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/palettes/isotem.pal"
+    AND EXISTS "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/extracted_palettes/cache_isotem.pal"
+    AND EXISTS "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/extracted_palettes/cache_unittem.pal"
+    AND EXISTS "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/ra2md/localmd/mpyscrn.pal"
+    AND EXISTS "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/expandmd01/mpyscrn.pal"
+    AND EXISTS "${CMAKE_SOURCE_DIR}/resources/palettes/anim.pal")
+    add_test(NAME pal_decoder_asset_samples_test COMMAND concord_pal_decoder_contract
+        "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/palettes/isotem.pal"
+        "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/extracted_palettes/cache_isotem.pal"
+        "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/extracted_palettes/cache_unittem.pal"
+        "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/ra2md/localmd/mpyscrn.pal"
+        "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/expandmd01/mpyscrn.pal"
+        "${CMAKE_SOURCE_DIR}/resources/palettes/anim.pal")
+    set_tests_properties(pal_decoder_asset_samples_test
+        PROPERTIES TIMEOUT 30 LABELS "local-assets;pal-codec")
+endif()
+
+add_test(NAME map_preview_resource_context_contract_test
+    COMMAND concord_map_preview_resource_context_contract "${CMAKE_BINARY_DIR}/s10-preview-session-contract")
+set_tests_properties(map_preview_resource_context_contract_test
+    PROPERTIES TIMEOUT 30 LABELS "no-assets;preview-resource-context")
+
+add_test(NAME runtime_replay_event_snapshot_contract_test
+    COMMAND concord_replay_event_snapshot_contract
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/runtime_replay_snapshot_valid.txt"
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/runtime_replay_snapshot_invalid.txt")
+add_test(NAME runtime_replay_event_snapshot_header_probe_test
+    COMMAND concord_replay_event_snapshot_header_probe)
+set_tests_properties(runtime_replay_event_snapshot_contract_test runtime_replay_event_snapshot_header_probe_test
+    PROPERTIES TIMEOUT 30 LABELS "no-assets;runtime-contract;replay-snapshot")
+
+add_test(NAME runtime_match_score_contract_test COMMAND concord_runtime_match_score_contract)
+set_tests_properties(runtime_match_score_contract_test
+    PROPERTIES TIMEOUT 30 LABELS "no-assets;match-score-contract")
+
+add_test(NAME player_slot_role_contract_test COMMAND concord_player_slot_role_contract)
+add_test(NAME runtime_observer_contract_test COMMAND concord_runtime_observer_contract)
+set_tests_properties(player_slot_role_contract_test runtime_observer_contract_test
+    PROPERTIES TIMEOUT 30 LABELS "no-assets;seat-role-contract")
 
 add_test(
     NAME campaign_map_selection_smoke_test
@@ -260,6 +366,12 @@ add_test(
     NAME runtime_atomic_file_smoke_test
     COMMAND concord_runtime_atomic_file_smoke
 )
+if(TARGET concord_runtime_atomic_file_win32_contract)
+    add_test(NAME runtime_atomic_file_win32_contract_test
+        COMMAND concord_runtime_atomic_file_win32_contract
+            "${CMAKE_CURRENT_BINARY_DIR}/atomic-win32-contract-samples")
+    set_tests_properties(runtime_atomic_file_win32_contract_test PROPERTIES TIMEOUT 90 LABELS "windows-minimal;no-assets;file-io;native-contract")
+endif()
 
 add_test(
     NAME runtime_spy_system_smoke_test
@@ -419,6 +531,18 @@ add_test(
 )
 set_tests_properties(runtime_config_smoke_test PROPERTIES TIMEOUT 30)
 add_test(
+    NAME runtime_file_path_contract_test
+    COMMAND concord_runtime_file_path_contract "${CMAKE_BINARY_DIR}/runtime_file_path_contract"
+)
+set_tests_properties(runtime_file_path_contract_test PROPERTIES TIMEOUT 30 LABELS "unit;platform;files;fixture")
+
+add_test(NAME runtime_resource_path_contract_test
+    COMMAND concord_runtime_resource_path_contract "${CMAKE_BINARY_DIR}/runtime_resource_path_contract")
+set_tests_properties(runtime_resource_path_contract_test PROPERTIES TIMEOUT 60 LABELS "unit;platform;files;resources;fixture")
+add_test(NAME audio_path_contract_test
+    COMMAND concord_audio_path_contract "${CMAKE_BINARY_DIR}/audio_path_contract")
+set_tests_properties(audio_path_contract_test PROPERTIES TIMEOUT 60 LABELS "unit;platform;files;audio;fixture")
+add_test(
     NAME runtime_multiplayer_launch_config_smoke_test
     COMMAND concord_multiplayer_launch_config_smoke
 )
@@ -513,7 +637,7 @@ add_test(
     COMMAND concord_internet_service_lobby_e2e
 )
 set_tests_properties(
-    runtime_internet_service_lobby_e2e_test PROPERTIES TIMEOUT 120
+    runtime_internet_service_lobby_e2e_test PROPERTIES TIMEOUT 600
 )
 
 add_test(
@@ -685,3 +809,467 @@ foreach (special_mechanism_name IN ITEMS timed-bomb parasite)
     )
 endforeach()
 
+
+add_test(NAME shp_codec_contract_test COMMAND concord_shp_codec_contract)
+set_tests_properties(shp_codec_contract_test PROPERTIES TIMEOUT 30 LABELS "no-assets;shp-codec-contract")
+add_test(NAME runtime_auxiliary_animation_contract COMMAND concord_auxiliary_animation_contract)
+set_tests_properties(runtime_auxiliary_animation_contract PROPERTIES
+    TIMEOUT 30 LABELS "no-assets;auxiliary-animation")
+add_test(NAME ui_clock_contract_test COMMAND concord_ui_clock_contract)
+set_tests_properties(ui_clock_contract_test PROPERTIES
+    TIMEOUT 30 LABELS "no-assets;ui-clock;platform-time")
+if(TARGET concord_ui_clock_win32_reference)
+    add_test(NAME ui_clock_win32_reference_test COMMAND concord_ui_clock_win32_reference)
+    set_tests_properties(ui_clock_win32_reference_test PROPERTIES
+        TIMEOUT 30 LABELS "no-assets;ui-clock;windows-reference")
+    add_test(NAME runtime_ui_clock_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/ui_clock_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/mapsmd03/all01umd.map")
+    set_tests_properties(runtime_ui_clock_smoke_test PROPERTIES
+        TIMEOUT 180 LABELS "assets;ui-clock;windows-reference"
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_UI_CLOCK_ONLY=1")
+endif()
+
+# W009-01: same production selection-key controller and actual bridge timing.
+add_test(NAME selection_key_controller_contract_test COMMAND concord_selection_key_controller_contract)
+set_tests_properties(selection_key_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;selection-keys")
+add_test(NAME runtime_selection_key_bridge_smoke_test COMMAND concord_selection_key_bridge_smoke)
+set_tests_properties(runtime_selection_key_bridge_smoke_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 120
+    LABELS "loopback;selection-keys;bridge-timing")
+if(WIN32)
+    add_test(NAME runtime_selection_key_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/selection_keys_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/mapsmd03/all01umd.map")
+    set_tests_properties(runtime_selection_key_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 180
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_SELECTION_KEYS_ONLY=1"
+        LABELS "assets;selection-keys;windows-reference")
+endif()
+
+
+# W009-02: one Team controller in both ordinary and real Win32 input paths.
+add_test(NAME team_key_controller_contract_test COMMAND concord_team_key_controller_contract)
+set_tests_properties(team_key_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;team-keys")
+if(WIN32)
+    add_test(NAME runtime_team_key_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/team_keys_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/mapsmd03/all01umd.map")
+    set_tests_properties(runtime_team_key_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 180
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_TEAM_KEYS_ONLY=1"
+        LABELS "assets;team-keys;windows-reference")
+endif()
+
+# W009-03: four local navigation entries, same standard and real native paths.
+add_test(NAME local_navigation_controller_contract_test COMMAND concord_local_navigation_controller_contract)
+set_tests_properties(local_navigation_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;local-navigation")
+if(WIN32)
+    add_test(NAME runtime_local_navigation_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/local_navigation_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/mapsmd03/all01umd.map")
+    set_tests_properties(runtime_local_navigation_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_LOCAL_NAVIGATION_ONLY=1"
+        LABELS "assets;local-navigation;windows-reference")
+endif()
+
+# W009-04: same Reference presentation controller in standard and private native paths.
+add_test(NAME reference_presentation_controller_contract_test COMMAND concord_reference_presentation_controller_contract)
+set_tests_properties(reference_presentation_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;reference-presentation")
+if(WIN32)
+    add_test(NAME runtime_reference_presentation_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/reference_presentation_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/dryheat.map")
+    set_tests_properties(runtime_reference_presentation_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_REFERENCE_PRESENTATION_ONLY=1"
+        LABELS "assets;reference-presentation;windows-reference")
+endif()
+# W009-05: one communication decision owner in ordinary, real native and bridge paths.
+add_test(NAME reference_communication_controller_contract_test COMMAND concord_reference_communication_controller_contract)
+set_tests_properties(reference_communication_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;reference-communication")
+add_test(NAME reference_communication_bridge_smoke_test COMMAND concord_reference_communication_bridge_smoke)
+set_tests_properties(reference_communication_bridge_smoke_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 60 RUN_SERIAL TRUE
+    LABELS "no-assets;platform-input;reference-communication;network")
+if(WIN32)
+    add_test(NAME runtime_reference_communication_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/reference_communication_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/dryheat.map")
+    set_tests_properties(runtime_reference_communication_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600 RUN_SERIAL TRUE
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_REFERENCE_COMMUNICATION_ONLY=1"
+        LABELS "assets;reference-communication;windows-reference")
+endif()
+# W009-06: one planning/factory decision owner in standard, native and bridge paths.
+add_test(NAME planning_factory_key_controller_contract_test COMMAND concord_planning_factory_key_contract)
+set_tests_properties(planning_factory_key_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;planning-factory-key")
+add_test(NAME planning_factory_key_bridge_smoke_test COMMAND concord_planning_factory_key_bridge_smoke)
+set_tests_properties(planning_factory_key_bridge_smoke_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 60 RUN_SERIAL TRUE
+    LABELS "no-assets;platform-input;planning-factory-key;network")
+if(WIN32)
+    add_test(NAME runtime_planning_factory_key_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/planning_factory_key_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/dryheat.map")
+    set_tests_properties(runtime_planning_factory_key_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600 RUN_SERIAL TRUE
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_PLANNING_FACTORY_KEY_ONLY=1"
+        LABELS "assets;planning-factory-key;windows-reference")
+endif()
+
+add_test(NAME camera_key_controller_contract_test COMMAND concord_camera_key_contract)
+set_tests_properties(camera_key_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;camera-key")
+if(WIN32)
+    add_test(NAME runtime_camera_key_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/camera_key_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/dryheat.map")
+    set_tests_properties(runtime_camera_key_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600 RUN_SERIAL TRUE
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_CAMERA_KEY_ONLY=1"
+        LABELS "assets;camera-key;windows-reference")
+endif()
+
+
+add_test(NAME menu_key_controller_contract_test COMMAND concord_menu_key_contract)
+set_tests_properties(menu_key_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;menu-key")
+if(WIN32)
+    add_test(NAME runtime_menu_key_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/menu_key_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/dryheat.map")
+    set_tests_properties(runtime_menu_key_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600 RUN_SERIAL TRUE
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_MENU_KEY_ONLY=1"
+        LABELS "assets;menu-key;windows-reference")
+endif()
+
+
+add_test(NAME session_key_controller_contract_test COMMAND concord_session_key_contract)
+set_tests_properties(session_key_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;session-key")
+if(WIN32)
+    add_test(NAME runtime_session_key_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/session_key_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/dryheat.map")
+    set_tests_properties(runtime_session_key_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600 RUN_SERIAL TRUE
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_SESSION_KEY_ONLY=1"
+        LABELS "assets;session-key;windows-reference")
+endif()
+
+add_test(NAME keyboard_router_controller_contract_test COMMAND concord_keyboard_router_contract)
+set_tests_properties(keyboard_router_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;keyboard-router")
+if(WIN32)
+    add_test(NAME runtime_keyboard_router_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/keyboard_router_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/dryheat.map")
+    set_tests_properties(runtime_keyboard_router_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600 RUN_SERIAL TRUE
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_KEYBOARD_ROUTER_ONLY=1"
+        LABELS "assets;keyboard-router;windows-reference")
+endif()
+
+add_test(NAME keyboard_ingress_controller_contract_test COMMAND concord_keyboard_ingress_contract)
+set_tests_properties(keyboard_ingress_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;keyboard-ingress")
+if(WIN32)
+    add_test(NAME runtime_keyboard_ingress_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/keyboard_ingress_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/dryheat.map")
+    set_tests_properties(runtime_keyboard_ingress_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600 RUN_SERIAL TRUE
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_KEYBOARD_INGRESS_ONLY=1"
+        LABELS "assets;keyboard-ingress;windows-reference")
+endif()
+
+# W011-01: same production UTF-16 text controller, native and running bridge.
+add_test(NAME chat_text_controller_contract_test COMMAND concord_chat_text_controller_contract)
+set_tests_properties(chat_text_controller_contract_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 30
+    LABELS "no-assets;platform-input;chat-text")
+add_test(NAME chat_text_bridge_smoke_test COMMAND concord_chat_text_bridge_smoke)
+set_tests_properties(chat_text_bridge_smoke_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 60 RUN_SERIAL TRUE
+    LABELS "no-assets;platform-input;chat-text;network")
+if(WIN32)
+    add_test(NAME runtime_chat_text_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/chat_text_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/dryheat.map")
+    set_tests_properties(runtime_chat_text_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600 RUN_SERIAL TRUE
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_CHAT_TEXT_ONLY=1"
+        LABELS "assets;chat-text;windows-reference")
+endif()
+add_test(NAME navigation_terrain_query_contract_test COMMAND concord_navigation_terrain_query_contract)
+set_tests_properties(navigation_terrain_query_contract_test PROPERTIES TIMEOUT 60 LABELS "navigation-terrain;standard-contract")
+add_test(NAME tmp_codec_contract_test COMMAND concord_tmp_codec_contract)
+set_tests_properties(tmp_codec_contract_test PROPERTIES TIMEOUT 120 LABELS "tmp-codec;standard-contract")
+add_test(NAME terrain_tmp_query_contract_test
+    COMMAND "${CMAKE_COMMAND}"
+        "-DCONTRACT_EXECUTABLE=$<TARGET_FILE:concord_terrain_tmp_query_contract>"
+        "-DOUTPUT_PARENT=${CMAKE_BINARY_DIR}/terrain-tmp-query-contract-runs"
+        -P "${CMAKE_SOURCE_DIR}/cmake/RunTerrainTmpQueryContract.cmake")
+set_tests_properties(terrain_tmp_query_contract_test PROPERTIES TIMEOUT 180 LABELS "tmp-query;standard-contract")
+add_test(NAME computer_mining_codec_contract_test
+    COMMAND concord_computer_mining_codec_contract
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/runtime_computer_mining_codec")
+set_tests_properties(computer_mining_codec_contract_test PROPERTIES
+    TIMEOUT 120 LABELS "computer-mining-codec;standard-contract")
+
+add_test(NAME computer_tactics_codec_runtime_test COMMAND concord_computer_tactics_codec_runtime)
+add_test(NAME computer_tactics_codec_contract_test COMMAND concord_computer_tactics_codec_contract)
+set_tests_properties(computer_tactics_codec_runtime_test computer_tactics_codec_contract_test PROPERTIES
+    TIMEOUT 60 LABELS "computer-tactics-codec;standard-contract;no-assets")
+
+add_test(NAME economy_production_fixed_step_contract_test
+    COMMAND concord_economy_production_fixed_step_contract
+        "${CMAKE_SOURCE_DIR}/tests/fixtures/runtime_economy_production_fixed_step")
+set_tests_properties(economy_production_fixed_step_contract_test PROPERTIES
+    LABELS "unit;economy;production;determinism" TIMEOUT 60)
+
+add_test(NAME bink_playback_service_contract_test
+    COMMAND concord_bink_playback_service_contract "${CMAKE_BINARY_DIR}/bink-playback-absent-material")
+set_tests_properties(bink_playback_service_contract_test
+    PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77 LABELS "no-assets;video-service-contract")
+
+add_test(NAME match_replay_envelope_contract_test COMMAND concord_match_replay_contract)
+set_tests_properties(match_replay_envelope_contract_test PROPERTIES
+    TIMEOUT 60 LABELS "no-assets;replay;recovery")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/recovery-consistency-contract-cwd")
+add_test(NAME runtime_recovery_consistency_contract_test
+    COMMAND concord_runtime --multiplayer-snapshot-v15-smoke-test
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/runtime_recovery_consistency.ini")
+set_tests_properties(runtime_recovery_consistency_contract_test PROPERTIES
+    TIMEOUT 120 LABELS "no-assets;recovery;determinism"
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/recovery-consistency-contract-cwd"
+    ENVIRONMENT "CONCORD_RECOVERY_CONSISTENCY_ONLY=1;CONCORD_RECOVERY_CONTRACT_OUTPUT=${CMAKE_BINARY_DIR}/recovery-consistency-contract-runs")
+
+add_test(NAME movie_path_contract_test
+    COMMAND concord_movie_path_contract "${CMAKE_BINARY_DIR}/movie_path_contract")
+set_tests_properties(movie_path_contract_test PROPERTIES TIMEOUT 60 LABELS "unit;platform;files;movie;fixture")
+
+add_test(NAME menu_resource_watch_contract_test
+    COMMAND concord_menu_resource_watch_contract "${CMAKE_BINARY_DIR}/menu-resource-watch-contract")
+set_tests_properties(menu_resource_watch_contract_test PROPERTIES TIMEOUT 60 LABELS "unit;platform;files;menu-watch;fixture")
+
+add_test(NAME main_bitmap_text_contract_test COMMAND concord_main_bitmap_text_contract)
+set_tests_properties(main_bitmap_text_contract_test PROPERTIES TIMEOUT 60 LABELS "no-assets;main-bitmap;standard-contract")
+
+if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/tests/ui/main_bitmap_text/ActualMainLayoutV1.bin" AND EXISTS "${CMAKE_SOURCE_DIR}/RedAlert2/GameMD/game.fnt")
+ add_test(NAME main_bitmap_text_native_reference_test COMMAND "${CMAKE_COMMAND}"
+  "-DREFERENCE_EXECUTABLE=$<TARGET_FILE:concord_main_bitmap_text_native_contract>"
+  "-DLAYOUT_FIXTURE=${CMAKE_SOURCE_DIR}/tests/ui/main_bitmap_text/ActualMainLayoutV1.bin"
+  "-DFONT_FILE=${CMAKE_SOURCE_DIR}/RedAlert2/GameMD/game.fnt"
+  -P "${CMAKE_SOURCE_DIR}/cmake/RunMainBitmapTextReference.cmake")
+ set_tests_properties(main_bitmap_text_native_reference_test PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE LABELS "assets;main-bitmap;windows-original-reference")
+endif()
+
+add_test(NAME result_bitmap_text_value_contract_test COMMAND concord_result_bitmap_text_value_contract)
+set_tests_properties(result_bitmap_text_value_contract_test PROPERTIES TIMEOUT 60 LABELS "no-assets;result-bitmap;standard-contract")
+if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/tests/ui/result_bitmap_text/ActualResultLayoutV1.bin" AND EXISTS "${CMAKE_SOURCE_DIR}/RedAlert2/GameMD/game.fnt")
+ add_test(NAME result_bitmap_text_native_contract_test COMMAND concord_result_bitmap_text_native_contract
+  "${CMAKE_SOURCE_DIR}/tests/ui/result_bitmap_text/ActualResultLayoutV1.bin"
+  "${CMAKE_SOURCE_DIR}/RedAlert2/GameMD/game.fnt")
+ set_tests_properties(result_bitmap_text_native_contract_test PROPERTIES TIMEOUT 600 RUN_SERIAL TRUE LABELS "assets;result-bitmap;windows-original-reference")
+endif()
+
+if(TARGET concord_main_bmp_native_contract)
+ add_test(NAME main_bmp_native_contract_test COMMAND concord_main_bmp_native_contract)
+ set_tests_properties(main_bmp_native_contract_test PROPERTIES TIMEOUT 300 LABELS "windows;bmp;native-reference")
+endif()
+
+add_test(NAME main_bmp_value_contract_test COMMAND concord_main_bmp_value_contract)
+set_tests_properties(main_bmp_value_contract_test PROPERTIES TIMEOUT 30 LABELS "standard;bmp;owned-image")
+
+add_test(NAME main_system_font_value_contract_test COMMAND concord_main_system_font_value_contract)
+set_tests_properties(main_system_font_value_contract_test PROPERTIES TIMEOUT 30 LABELS "standard;font;value")
+if(TARGET concord_main_system_font_native_contract AND EXISTS "${CMAKE_SOURCE_DIR}/tests/ui/main_system_font/ActualMainSystemLayoutV1.bin")
+ add_test(NAME main_system_font_native_contract_test COMMAND concord_main_system_font_native_contract "${CMAKE_SOURCE_DIR}/tests/ui/main_system_font/ActualMainSystemLayoutV1.bin")
+ set_tests_properties(main_system_font_native_contract_test PROPERTIES TIMEOUT 300 LABELS "windows;system-font;native-reference")
+endif()
+
+add_test(NAME skirmish_system_font_value_contract_test COMMAND concord_skirmish_system_font_value_contract)
+set_tests_properties(skirmish_system_font_value_contract_test PROPERTIES TIMEOUT 30 LABELS "standard;font;values")
+if(TARGET concord_skirmish_system_font_native_contract)
+ add_test(NAME skirmish_system_font_native_contract_test COMMAND concord_skirmish_system_font_native_contract)
+ set_tests_properties(skirmish_system_font_native_contract_test PROPERTIES RUN_SERIAL TRUE TIMEOUT 120 LABELS "windows;font-owner;native-reference")
+endif()
+
+ add_test(NAME campaign_system_font_value_contract_test COMMAND concord_campaign_system_font_value_contract)
+ set_tests_properties(campaign_system_font_value_contract_test PROPERTIES TIMEOUT 30 LABELS "standard;font;values")
+ if(TARGET concord_campaign_system_font_native_contract AND EXISTS "${CMAKE_SOURCE_DIR}/tests/ui/campaign_system_font/ActualCampaignSystemTextV1.bin")
+  add_test(NAME campaign_system_font_native_contract_test COMMAND concord_campaign_system_font_native_contract "${CMAKE_SOURCE_DIR}/tests/ui/campaign_system_font/ActualCampaignSystemTextV1.bin")
+  set_tests_properties(campaign_system_font_native_contract_test PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS "windows;font;native-reference")
+ endif()
+
+
+add_test(NAME match_result_system_font_value_contract_test COMMAND concord_match_result_system_font_value_contract)
+set_tests_properties(match_result_system_font_value_contract_test PROPERTIES TIMEOUT 30 LABELS "standard;font;values")
+if(TARGET concord_match_result_system_font_native_contract AND EXISTS "${CMAKE_SOURCE_DIR}/tests/ui/match_result_system_font/ActualMatchSystemTextV1.bin")
+ add_test(NAME match_result_system_font_native_contract_test COMMAND concord_match_result_system_font_native_contract "${CMAKE_SOURCE_DIR}/tests/ui/match_result_system_font/ActualMatchSystemTextV1.bin")
+ set_tests_properties(match_result_system_font_native_contract_test PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE LABELS "windows;font;native-reference")
+endif()
+
+add_test(NAME campaign_score_system_font_value_contract_test COMMAND concord_campaign_score_system_font_value_contract)
+set_tests_properties(campaign_score_system_font_value_contract_test PROPERTIES TIMEOUT 30 LABELS "standard;font;values")
+if(TARGET concord_campaign_score_system_font_native_contract AND EXISTS "${CMAKE_SOURCE_DIR}/tests/ui/campaign_score_system_font/ActualCampaignScoreTextV1.bin")
+ add_test(NAME campaign_score_system_font_native_contract_test COMMAND concord_campaign_score_system_font_native_contract "${CMAKE_SOURCE_DIR}/tests/ui/campaign_score_system_font/ActualCampaignScoreTextV1.bin")
+ set_tests_properties(campaign_score_system_font_native_contract_test PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE LABELS "windows;font;native-reference")
+endif()
+
+add_test(NAME main_video_footer_font_value_contract_test COMMAND concord_main_video_footer_font_value_contract)
+set_tests_properties(main_video_footer_font_value_contract_test PROPERTIES TIMEOUT 30 LABELS "standard;font;values")
+if(TARGET concord_main_video_footer_font_native_contract AND EXISTS "${CMAKE_SOURCE_DIR}/tests/ui/main_video_footer_font/ActualMainVideoFooterV1.bin")
+ add_test(NAME main_video_footer_font_native_contract_test COMMAND concord_main_video_footer_font_native_contract "${CMAKE_SOURCE_DIR}/tests/ui/main_video_footer_font/ActualMainVideoFooterV1.bin")
+ set_tests_properties(main_video_footer_font_native_contract_test PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE LABELS "windows;font;native-reference")
+endif()
+
+if(TARGET concord_hud_system_font_native_contract)
+ add_test(NAME hud_system_font_native_contract_test COMMAND concord_hud_system_font_native_contract)
+ set_tests_properties(hud_system_font_native_contract_test PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE LABELS "windows;hud-font;original-native-reference")
+endif()
+
+if(WIN32 AND NOT CONCORD_PORTABLE_CORE)
+    add_test(NAME runtime_internet_skin_drawing_contract_test
+        COMMAND concord_runtime --internet-menu-skin-smoke-test required-explicit-internet-skin-output
+            --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+            --local-data-root "${CMAKE_SOURCE_DIR}/local_data")
+    set_tests_properties(runtime_internet_skin_drawing_contract_test PROPERTIES
+        TIMEOUT 180 RUN_SERIAL TRUE LABELS "windows;internet-skin;real-native-drawing;explicit-output"
+        ENVIRONMENT "CONCORD_INTERNET_SKIN_DRAWING_CONTRACT=1;CONCORD_INTERNET_MENU_SMOKE_RETAIN=1")
+endif()
+
+if(TARGET concord_main_menu_surface_native_contract)
+ add_test(NAME main_menu_surface_native_contract_test COMMAND concord_main_menu_surface_native_contract)
+ set_tests_properties(main_menu_surface_native_contract_test PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE LABELS "windows;main-surface;real-native-lifetime")
+endif()
+
+if(TARGET concord_campaign_menu_surface_native_contract)
+ add_test(NAME campaign_menu_surface_native_contract_test COMMAND concord_campaign_menu_surface_native_contract)
+ set_tests_properties(campaign_menu_surface_native_contract_test PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE LABELS "windows;campaign-surface;real-native-lifetime")
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/RuntimeVoicePathContracts.cmake")
+
+if(WIN32 AND NOT CONCORD_PORTABLE_CORE)
+ add_test(NAME runtime_world_audio_device_lifecycle_test COMMAND concord_runtime --command-smoke-test --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2" --local-data-root "${CMAKE_SOURCE_DIR}/local_data" --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/2peaks.map")
+ set_tests_properties(runtime_world_audio_device_lifecycle_test PROPERTIES TIMEOUT 180 RUN_SERIAL TRUE LABELS "windows;world-audio;actual-device-lifecycle;explicit-output" ENVIRONMENT "CONCORD_COMMAND_SMOKE_WORLD_AUDIO_DEVICE_LIFECYCLE_ONLY=1")
+endif()
+
+# P03 minimum native MCI file binding; explicit cache input required by fixture.
+if(WIN32 AND NOT CONCORD_PORTABLE_CORE)
+  add_test(NAME runtime_mci_path_producer_native_test
+    COMMAND concord_runtime --command-smoke-test --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+      --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+      --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/2peaks.map")
+  set_tests_properties(runtime_mci_path_producer_native_test PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE
+    LABELS "windows-minimal;native-audio;file-binding"
+    ENVIRONMENT "CONCORD_COMMAND_SMOKE_MCI_PATH_ONLY=1")
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/RuntimeLegacyWaveContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/MainMusicDeviceContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/CampaignMapAudioDeviceContracts.cmake")
+
+include(cmake/MenuSoundDeviceContracts.cmake)
+
+include(cmake/AsyncSoundDeviceContracts.cmake)
+
+# H011: register after enable_testing in the original root test scope.
+add_test(NAME superweapon_core_runtime_contract_test COMMAND concord_superweapon_core_runtime_contract)
+add_test(NAME superweapon_core_contract_contract_test COMMAND concord_superweapon_core_contract_contract)
+set_tests_properties(superweapon_core_runtime_contract_test superweapon_core_contract_contract_test
+    PROPERTIES TIMEOUT 120 LABELS "superweapon-core;standard-contract;no-assets")
+
+add_test(NAME load_transaction_runtime_contract_test COMMAND concord_load_transaction_runtime_contract)
+add_test(NAME load_transaction_contract_contract_test COMMAND concord_load_transaction_contract_contract)
+set_tests_properties(load_transaction_runtime_contract_test load_transaction_contract_contract_test
+    PROPERTIES TIMEOUT 60 LABELS "load-transaction;standard-contract;no-assets")
+
+add_test(NAME computer_ai_trigger_hash_runtime_contract_test COMMAND concord_computer_ai_trigger_hash_runtime_contract)
+add_test(NAME computer_ai_trigger_hash_contract_contract_test COMMAND concord_computer_ai_trigger_hash_contract_contract)
+set_tests_properties(computer_ai_trigger_hash_runtime_contract_test computer_ai_trigger_hash_contract_contract_test
+    PROPERTIES TIMEOUT 60 LABELS "computer-ai-trigger-hash;standard-contract;no-assets")
+
+# H035: Contract owner already exists; preserve root include order.
+include("${CMAKE_CURRENT_LIST_DIR}/TriggerSchedulerContracts.cmake")
+
+# H036: existing Contract owner and H035 providers already registered.
+include("${CMAKE_CURRENT_LIST_DIR}/VisionPhaseContracts.cmake")
+
+# H039: original identity admission with existing Ini/Contract producers.
+include("${CMAKE_CURRENT_LIST_DIR}/SaveIdentityContracts.cmake")
+
+# H039: same actual trigger domain persistence, existing standard providers.
+include("${CMAKE_CURRENT_LIST_DIR}/TriggerPersistenceContracts.cmake")
+
+# H03904: original actual mission writer/parser/restore qualification.
+include("${CMAKE_CURRENT_LIST_DIR}/TeamMissionRecoveryContracts.cmake")
+
+# H033: original committed ground motion and behavior values, one producer.
+include("${CMAKE_CURRENT_LIST_DIR}/CommittedGroundMotionContracts.cmake")
+
+# R011: same actual physical open-transport source query and FLH value.
+include("${CMAKE_CURRENT_LIST_DIR}/OpenTransportSourceContracts.cmake")

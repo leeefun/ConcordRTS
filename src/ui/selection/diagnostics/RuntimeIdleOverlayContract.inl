@@ -170,7 +170,7 @@ bool runRuntimeIdleOverlayContract(RuntimeWindowState& live, std::string& error)
         GdiFlush();
         std::copy(backdrop.begin(), backdrop.end(), static_cast<std::uint32_t*>(target.pixels));
         // UI sprite paths use state.backBuffer to find the same CPU surface.
-        std::swap(probe.backBuffer, target);
+        probe.backBuffer.swap(target);
         context.surfacePixels = static_cast<std::uint32_t*>(probe.backBuffer.pixels);
         context.surfaceWidth = width;
         context.surfaceHeight = height;
@@ -178,7 +178,7 @@ bool runRuntimeIdleOverlayContract(RuntimeWindowState& live, std::string& error)
         drawRuntimeInteractionOverlay(probe.backBuffer.memoryDc, clientRect, probe, context,
             forceProjection, !forceProjection, !forceProjection);
         GdiFlush();
-        std::swap(probe.backBuffer, target);
+        probe.backBuffer.swap(target);
     };
 
     constexpr std::array<const char*, 10> names{
@@ -189,12 +189,12 @@ bool runRuntimeIdleOverlayContract(RuntimeWindowState& live, std::string& error)
         probe.selectedObjectIds.clear();
         probe.repairingStructureTicks.clear();
         probe.mouseClientPointValid = false;
-        probe.selectionDragActive = probe.selectionDragMoved = false;
+        probe.leftPointer.active = probe.leftPointer.moved = false;
         probe.world.accessObjects()[0].veterancy = 0;
         if (scenario == 1) {
-            probe.selectionDragActive = probe.selectionDragMoved = true;
-            probe.selectionStart = {viewport.left + 30, viewport.top + 30};
-            probe.selectionCurrent = {viewport.left + 180, viewport.top + 110};
+            probe.leftPointer.active = probe.leftPointer.moved = true;
+            probe.leftPointer.start = {viewport.left + 30, viewport.top + 30};
+            probe.leftPointer.current = {viewport.left + 180, viewport.top + 110};
         } else if (scenario == 2) {
             probe.mouseClientPointValid = true;
             probe.mouseClientPoint = {-20, -20};

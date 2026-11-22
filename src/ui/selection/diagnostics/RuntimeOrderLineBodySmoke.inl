@@ -74,10 +74,10 @@ bool runRuntimeOrderLineBodySmoke(RuntimeWindowState& live,std::string& error) {
         invalidateRuntimeObjectProjectionCache(s);auto context=contextFor(s);
         std::map<int,POINT> centers,oldCenters;std::map<int,RuntimeMobileSpriteBoundsProbe> probes;
         for(int id:s.selectedObjectIds){const auto* o=findObjectById(s,id);if(!o)return fail(label+" selected object absent");
-            const auto placement=runtimeObjectWorldRenderPlacement(*o,s.world,viewport,context,s.camera,s.renderCache);
+            const auto placement=runtimeRenderPlacementNative(runtimeObjectWorldRenderPlacementWin32(*o,s.world,viewport,context,s.camera,s.renderCache));
             auto& probe=probes[id];if(!verifyRuntimeMobileObjectSpriteBounds(*o,placement.center,context,s.camera,s.renderCache,probe))
                 return fail(label+" real body oracle: "+probe.diagnostic);
-            const RECT body=probe.renderedBounds;centers[id]={body.left+(body.right-body.left)/2,body.top+(body.bottom-body.top)/2};
+            const RECT body=runtimeRenderPlacementNativeRect(probe.renderedBounds);centers[id]={body.left+(body.right-body.left)/2,body.top+(body.bottom-body.top)/2};
             const auto subcell=worldObjectSubCellOffset(*o);oldCenters[id]=pointFor(s,runtimeObjectRenderX(*o)+subcell.x,runtimeObjectRenderY(*o)+subcell.y,runtimeObjectRenderLevel(*o));
         }
         std::vector<std::uint32_t> background(width*height,0x001c2834U);
@@ -102,7 +102,7 @@ bool runRuntimeOrderLineBodySmoke(RuntimeWindowState& live,std::string& error) {
         std::array<int,3> drawn{};
         for(int mode=0;mode<3;++mode){RuntimeSelectedPathRasterReferenceScope rasterReference(mode!=2);
             auto& b=surfaces.buffers[mode+1];
-            if(mode==2){std::swap(s.backBuffer,b);drawn[mode]=drawRuntimeSelectedPaths(s.backBuffer.memoryDc,viewport,s,true);std::swap(s.backBuffer,b);}
+            if(mode==2){s.backBuffer.swap(b);drawn[mode]=drawRuntimeSelectedPaths(s.backBuffer.memoryDc,viewport,s,true);s.backBuffer.swap(b);}
             else drawn[mode]=drawRuntimeSelectedPaths(b.memoryDc,viewport,s,mode==1);GdiFlush();
         }
         const auto after=runtimeStandaloneSimulationStateHash(s,hashError);if(before!=after||!hashError.empty())return fail(label+" drawing changed authority");
@@ -111,7 +111,7 @@ bool runRuntimeOrderLineBodySmoke(RuntimeWindowState& live,std::string& error) {
         const bool ok=!mismatches[0]&&!mismatches[1]&&!mismatches[2]
             &&drawn[0]==static_cast<int>(s.selectedObjectIds.size())&&drawn[1]==drawn[0]&&drawn[2]==drawn[0];
         ++checks;if(!ok)note(label+" body-origin pixels");
-        for(int id:s.selectedObjectIds){const auto* o=findObjectById(s,id);const auto& probe=probes.at(id);const RECT b=probe.renderedBounds;
+        for(int id:s.selectedObjectIds){const auto* o=findObjectById(s,id);const auto& probe=probes.at(id);const RECT b=runtimeRenderPlacementNativeRect(probe.renderedBounds);
             rows<<label<<','<<o->type<<','<<s.tick<<','<<zoom<<','<<pan<<','<<b.left<<','<<b.top<<','<<b.right<<','<<b.bottom<<','
                 <<centers.at(id).x<<','<<centers.at(id).y<<','<<oldCenters.at(id).x<<','<<oldCenters.at(id).y<<','
                 <<mismatches[0]<<','<<mismatches[1]<<','<<mismatches[2]<<','<<wrong<<','<<probe.renderedPixels<<','<<ok<<'\n';

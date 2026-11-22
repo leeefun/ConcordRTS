@@ -79,8 +79,8 @@ bool runRuntimeBuildingRepairSmoke(RuntimeWindowState& live, std::string& error)
         const auto hitPoint = [&](int id) -> std::optional<POINT> {
             const auto all = projection();
             for (const auto& p : all) if (p.object && p.object->instanceId==id) {
-                for (int y=std::max<LONG>(viewport.top,p.bounds.top);y<std::min(viewport.bottom,p.bounds.bottom);y+=2)
-                    for (int x=std::max<LONG>(viewport.left,p.bounds.left);x<std::min(viewport.right,p.bounds.right);x+=2) {
+                for (int y=std::max<LONG>(viewport.top,p.bounds.top);y<std::min<LONG>(viewport.bottom,p.bounds.bottom);y+=2)
+                    for (int x=std::max<LONG>(viewport.left,p.bounds.left);x<std::min<LONG>(viewport.right,p.bounds.right);x+=2) {
                         const auto* hit=runtimeCursorObjectAtPoint(s,viewport,{x,y});
                         if (hit && hit->instanceId==id) return POINT{x,y};
                     }
@@ -158,9 +158,9 @@ bool runRuntimeBuildingRepairSmoke(RuntimeWindowState& live, std::string& error)
         const POINT empty{viewport.left+5,viewport.top+5};
         const auto blocked=runtimeMouseCursorFrameForPoint(s,client,empty);
         if(!blocked || blocked->frameIndex!=190)return fail("blocked repair cursor");
-        s.rightDragActive=true;
+        s.rightPointer.active=true;
         if(runtimeMouseCursorFrameForPoint(s,client,*buildingPoint)->frameIndex!=385)return fail("repair panning cursor");
-        s.rightDragActive=false;s.mouseClientPointValid=false;
+        s.rightPointer.active=false;s.mouseClientPointValid=false;
         if(runtimeMouseCursorFrameForPoint(s,client,*buildingPoint))return fail("mouse outside capture");
         // Test crop at all four map edges on both the CPU and GDI sprite paths.
         s.tick=0;const auto edgeObjects=projection();const auto originalCamera=s.camera;

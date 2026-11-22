@@ -1,9 +1,29 @@
 #pragma once
 
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
+#include "render/geometry/RuntimeSpriteHitSpan.h"
+#include "render/geometry/RuntimeSpriteHitSpanQueries.h"
+#include "render/geometry/RuntimeGeometryQueryScope.h"
+#include "render/geometry/RuntimeObjectBodyAnchor.h"
+#include "render/geometry/RuntimeProjectileScreenPoint.h"
+#include "render/geometry/RuntimeBuildingVisibleHitSpans.h"
+#include "render/geometry/RuntimeStructureSpriteQuery.h"
+#include "render/geometry/RuntimeStructureTurretScreenOffset.h"
+#include "render/geometry/RuntimeMapSurfacePick.h"
+#include "render/geometry/RuntimeInfantryMuzzleQuery.h"
+#include "render/geometry/RuntimeMarineMuzzleQuery.h"
+#include "render/geometry/RuntimeStructureMuzzleQuery.h"
+#include "render/geometry/RuntimeVoxelMuzzleQuery.h"
+#include "render/geometry/RuntimeSpawnedMissileBoundsQuery.h"
+#include "render/geometry/RuntimeObjectShpBoundsQuery.h"
+#include "render/geometry/RuntimeMobileSpriteBoundsQuery.h"
+#include "render/geometry/RuntimeStructureSpriteGeometry.h"
+#include "render/core/RuntimeSpriteFrameImage.h"
+#include "render/core/RuntimeMapColorValues.h"
+#include "render/geometry/RuntimeObjectWorldRenderPlacement.h"
+#include "render/geometry/RuntimeMobileSpriteBoundsProbe.h"
+#include "assets/codecs/RuntimeTmpTypes.h"
+#include "assets/terrain/RuntimeTerrainTmpQuery.h"
+
 
 #include "data/art/ArtDatabase.h"
 #include "world/model/GameWorld.h"
@@ -16,8 +36,8 @@
 #include "simulation/combat/projectiles/RuntimeProjectileLineTrail.h"
 #include "simulation/effects/RuntimeParticleSystem.h"
 #include "render/shadows/RuntimeShadowOpaqueSpan.h"
-#include "render/voxel/RuntimeVoxelLoadingPrewarm.h"
 #include "data/art/TheaterDatabase.h"
+#include "simulation/navigation/terrain/RuntimeTerrainTypes.h"
 
 #include <array>
 #include <cstdint>
@@ -56,68 +76,12 @@ struct RuntimeGateRenderSnapshot {
     double normalizedProgress = 0.0;
 };
 
-struct RuntimePaletteColor {
-    unsigned char r = 0;
-    unsigned char g = 0;
-    unsigned char b = 0;
-};
-
 struct RuntimePaletteCacheEntry {
     std::string key;
     bool loadAttempted = false;
     bool loaded = false;
     std::vector<RuntimePaletteColor> palette;
     std::string sourcePath;
-};
-
-struct RuntimeTmpSubTileImage {
-    bool present = false;
-    bool hasTerrainType = false;
-    unsigned char terrainType = 0;
-    unsigned char rampType = 0;
-    bool hasRadarColors = false;
-    RuntimePaletteColor radarLeft;
-    RuntimePaletteColor radarRight;
-    int offsetX = 0;
-    int offsetY = 0;
-    int width = 0;
-    int height = 0;
-    int globalWidth = 0;
-    int globalHeight = 0;
-    std::vector<unsigned char> pixels;
-    mutable std::uint64_t packedPixelPaletteHash = 0;
-    mutable std::vector<std::uint32_t> packedPixels;
-    mutable int resourcePixelNonZeroCount = -1;
-    int baseOffsetX = 0;
-    int baseOffsetY = 0;
-    int baseWidth = 0;
-    int baseHeight = 0;
-    std::vector<unsigned char> basePixels;
-    mutable int resourceBaseNonZeroCount = -1;
-    std::vector<unsigned char> baseZData;
-    bool hasBaseZData = false;
-    bool hasExtra = false;
-    int extraOffsetX = 0;
-    int extraOffsetY = 0;
-    int extraWidth = 0;
-    int extraHeight = 0;
-    std::vector<unsigned char> extraPixels;
-    mutable int resourceExtraNonZeroCount = -1;
-    std::vector<unsigned char> extraZData;
-    bool hasExtraZData = false;
-};
-
-struct RuntimeTmpTileFile {
-    bool loadAttempted = false;
-    bool loaded = false;
-    int blockWidth = 0;
-    int blockHeight = 0;
-    std::vector<RuntimeTmpSubTileImage> images;
-    std::string errorMessage;
-    // Authored terrain grid, including empty image slots. SHP-style raw
-    // format-3 resources do not encode a terrain grid and leave this unknown.
-    int gridWidth = 0;
-    int gridHeight = 0;
 };
 
 struct RuntimeTerrainVisualVariant {
@@ -154,106 +118,13 @@ struct RuntimeTerrainVisualCellInfo {
 
 // Retail land-type ids after translating the TMP terrain byte. These values
 // match the engine's LandType table and are simulation data, not art labels.
-enum class RuntimeTerrainLandType : int {
-    Unknown = -1,
-    Clear = 0,
-    Road = 1,
-    Water = 2,
-    Rock = 3,
-    Wall = 4,
-    Tiberium = 5,
-    Beach = 6,
-    Rough = 7,
-    Ice = 8,
-    Railroad = 9,
-    Tunnel = 10
-};
 
-struct RuntimeVxlRasterPathStats {
-    int pointSamplesWritten = 0;
-    int cuboidFacesRasterized = 0;
-    int indexedCoveragePixelsResolved = 0;
-    int supersampledPixelsResolved = 0;
-    int triangleFacesRasterized = 0;
-    int coverageZOverwrites = 0;
-};
 
-// Horizontal nontransparent run. right is exclusive; rows are sorted by y/left.
-struct RuntimeSpriteHitSpan {
-    LONG y = 0;
-    LONG left = 0;
-    LONG right = 0;
-};
 
-struct RuntimeShpFrameImage {
-    int offsetX = 0;
-    int offsetY = 0;
-    int globalWidth = 0;
-    int globalHeight = 0;
-    int width = 0;
-    int height = 0;
-    std::vector<unsigned char> pixels;
-    std::vector<unsigned char> rawColorIndices;
-    std::vector<unsigned char> ownerRemapMask;
-    std::vector<unsigned char> lightLevels;
-    std::vector<unsigned char> normalIndices;
-    std::vector<unsigned char> normalBrightnessLevels;
-    std::vector<unsigned char> vplSections;
-    std::vector<unsigned char> depthLevels;
-    // Final scene-Z bounds from projected VXL section boxes, excluding shadow
-    // allocation. These retain retail's four-pixel padding at either edge.
-    bool sceneDepthBoundsValid = false;
-    int sceneDepthBoundsTop = 0;
-    int sceneDepthBoundsBottom = 0;
-    std::vector<unsigned int> pixelMaterials;
-    unsigned char paletteRemapStart = 0;
-    unsigned char paletteRemapEnd = 0;
-    bool paletteRemapRangeFromHeader = false;
-    int fallbackOwnerRemapCount = 0;
-    int zeroColorVoxelCount = 0;
-    RuntimeVxlRasterPathStats rasterPathStats;
-    std::string rasterFunctionActuallyCalled;
-    std::string rasterCacheKey;
-    bool rasterCacheHit = false;
-    bool vxlAlreadyVplResolved = false;
-    bool lightLevelsApplied = false;
-    bool remapLightApplied = false;
-    int opaqueBoundsWidth = 0;
-    int opaqueBoundsHeight = 0;
-    int topFacePixelCount = 0;
-    int sideFacePixelCount = 0;
-    int lowerFacePixelCount = 0;
-    int pointSampleCount = 0;
-    int faceSampleCount = 0;
-    int exposedFaceCount = 0;
-    std::string sourcePath;
-    mutable bool packedColorTablesValid = false;
-    mutable const RuntimePaletteColor* packedColorPaletteSource = nullptr;
-    mutable COLORREF packedColorRemap = RGB(255, 255, 255);
-    mutable int packedColorBrightnessLift = 0;
-    mutable double packedColorGradeContrast = 1.0;
-    mutable double packedColorGradeSaturation = 1.0;
-    mutable double packedColorGradeValueLift = 0.0;
-    mutable double packedColorExtraUnitLight = 0.0;
-    mutable unsigned char packedColorRemapStart = 16;
-    mutable unsigned char packedColorRemapEnd = 31;
-    mutable bool packedColorOwnerRemap = false;
-    mutable bool packedColorGradeEnabled = false;
-    mutable bool packedColorVxlPaletteLookup = false;
-    mutable std::vector<std::uint32_t> packedBaseColors;
-    mutable std::vector<std::uint32_t> packedRemapColors;
-    // Decoded frames are immutable after insertion in the render cache.
-    // Keep their opaque crop alongside the palette caches for cheap bounds queries.
-    mutable bool spriteOpaqueBoundsValid = false;
-    mutable RECT spriteOpaqueBounds{};
-    mutable bool spriteOpaqueSpansValid = false;
-    mutable std::vector<RuntimeSpriteHitSpan> spriteOpaqueSpans;
-    // Shadow occupancy is independent of the body image's opaque geometry.
-    mutable RuntimeShadowOpaqueSpanCache shadowMaskSpanCache;
-    mutable bool infantryContactScanned = false;
-    mutable bool infantryContactValid = false;
-    mutable POINT infantryContact{};
-};
+
+
+
+
 
 struct RuntimeObjectShpSpriteCacheEntry {
     bool loadAttempted = false;
@@ -671,7 +542,7 @@ struct RuntimeWaterWakeActor {
     std::string imageId;
 };
 
-struct RuntimeMapRenderCache {
+struct RuntimeMapRenderCache : RuntimeTerrainTmpCache {
     // Bounded presentation diagnostics only, excluded from authority/save.
     std::uint64_t terrainViewportFillCalls = 0;
     std::uint64_t terrainViewportFillElisions = 0;
@@ -679,7 +550,7 @@ struct RuntimeMapRenderCache {
     bool buildingDepthTemplateAttempted = false;
     RuntimeShpFrameImage buildingDepthTemplate;
     RuntimeNativeShroudAtlas nativeShroudAtlas;
-    std::unordered_map<int, COLORREF> terrainColorsByTileIndex;
+    RuntimeTerrainColorTable terrainColorsByTileIndex;
     std::string loadedPalettePath;
     bool paletteLoadAttempted = false;
     bool paletteLoaded = false;
@@ -702,11 +573,6 @@ struct RuntimeMapRenderCache {
     std::string voxelPaletteLookupErrorMessage;
     std::unordered_map<std::string, RuntimePaletteCacheEntry>
         namedPalettesByKey;
-    std::unordered_map<std::string, RuntimeTmpTileFile> tmpTilesByPath;
-    std::string lastTmpTileLoadError;
-    std::string terrainTilePathCacheRoot;
-    std::unordered_map<int, std::string> terrainTilePathByIndex;
-    std::unordered_set<int> missingTerrainTilePathByIndex;
     std::string terrainVisualFamilyCacheRoot;
     std::unordered_map<int, RuntimeTerrainVisualFamily> terrainVisualFamiliesByTileIndex;
     std::unordered_map<std::string, RuntimeObjectShpSpriteCacheEntry>
@@ -905,7 +771,7 @@ struct RuntimeMapRenderContext {
     const std::unordered_map<int, int>* playerCheerUntilTick = nullptr;
     const std::vector<RuntimeGateRenderSnapshot>* gateSnapshots = nullptr;
     const RuntimeUiResourceRenderSummary* uiResources = nullptr;
-    const std::unordered_map<std::string, COLORREF>* ownerRemapColors = nullptr;
+    const RuntimeOwnerRemapColorTable* ownerRemapColors = nullptr;
     const std::unordered_set<std::string>* neutralRemapOwners = nullptr;
     const RuntimeVisionSystem* vision = nullptr;
     // Explicit value-only world lighting.  A null pointer or identity tint
@@ -957,18 +823,7 @@ struct RuntimeMapRenderContext {
 // their complete current pose. No geometry survives the outer scope's exit.
 // Opt-in viewport-only structure geometry uses the compositor's body culling;
 // ordinary scopes and standalone geometry queries retain complete sprite bounds.
-class RuntimeGeometryQueryScope {
-public:
-    RuntimeGeometryQueryScope(const GameWorld& world, const RECT& viewport,
-        const RuntimeMapRenderContext& context, const RuntimeMapCamera& camera,
-        RuntimeMapRenderCache& cache, bool viewportStructureGeometryOnly = false);
-    ~RuntimeGeometryQueryScope();
-    RuntimeGeometryQueryScope(const RuntimeGeometryQueryScope&) = delete;
-    RuntimeGeometryQueryScope& operator=(const RuntimeGeometryQueryScope&) = delete;
-private:
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
-};
+
 
 // Read-only presentation pose at the same continuous ground position used by
 // drawing, including a stopped vehicle. No simulation/save state is mutated.
@@ -1372,15 +1227,7 @@ void scrollRuntimeMapCamera(RuntimeMapCamera& camera, int deltaX, int deltaY);
 
 // Synchronously resolves the visible terrain/bridge surface, independently of
 // WM_PAINT. Only presentation caches are updated; no world state is mutated.
-bool pickRuntimeMapSurfaceCell(
-    const GameWorld& world,
-    const RuntimeMapRenderContext& context,
-    const RuntimeMapCamera& camera,
-    const RECT& viewport,
-    POINT screenPoint,
-    RuntimeMapRenderCache& cache,
-    POINT& cell
-);
+
 
 bool runtimeObjectUsesAircraftSpriteForRender(
     const WorldObjectInstance& object, const RuntimeMapRenderContext& context
@@ -1391,12 +1238,7 @@ int runtimeAircraftSpriteLiftPixels(
     bool aircraft
 );
 
-POINT runtimeObjectBodyAnchorForRender(
-    const WorldObjectInstance& object,
-    const RECT& viewport,
-    const RuntimeMapRenderContext& context,
-    const RuntimeMapCamera& camera
-);
+
 
 bool runtimeGrandCannonBarrelDrawsInFront(int facing);
 
@@ -1469,27 +1311,14 @@ bool runRuntimeGroundImpactRenderContractCheck(
 );
 
 // Project the simulation's current position exactly once, including its arc.
-POINT runtimeProjectileActorScreenPoint(const RuntimeProjectileRenderActor& actor,
-    const RECT& viewport, const RuntimeMapCamera& camera);
 
-bool resolveRuntimeInfantryWeaponMuzzlePoint(const WorldObjectInstance& object,
-    const POINT& center, const RuntimeMapRenderContext& context,
-    const RuntimeMapCamera& camera, RuntimeMapRenderCache& cache, POINT& result);
-bool resolveRuntimeMarineWeaponMuzzlePoint(const WorldObjectInstance& object,
-    const POINT& center, const RuntimeMapRenderContext& context,
-    const RuntimeMapCamera& camera, RuntimeMapRenderCache& cache, POINT& result);
 
-bool resolveRuntimeStructureWeaponMuzzlePoint(const WorldObjectInstance& object,
-    const POINT& center, const RuntimeMapRenderContext& context,
-    const RuntimeMapCamera& camera, RuntimeMapRenderCache& cache,
-    int forwardLeptons, int lateralLeptons, int heightLeptons,
-    int firingFacing, bool secondary, POINT& result);
 
-bool resolveRuntimeVoxelWeaponMuzzlePoint(const WorldObjectInstance& object,
-    const POINT& bodyCenter, const RuntimeMapRenderContext& context,
-    const RuntimeMapCamera& camera, RuntimeMapRenderCache& cache,
-    int forwardLeptons, int lateralLeptons, int heightLeptons,
-    int firingFacing, POINT& point, bool useBarrelEndpoint = true);
+
+
+
+
+
 
 bool runRuntimeAllWeaponMuzzleRenderContract(
     const RuntimeMapRenderContext&, const GameWorld&,
@@ -1672,19 +1501,9 @@ bool advanceRuntimeWaterWakeState(
 
 void resetRuntimeWaterWakeState(RuntimeMapRenderCache& cache);
 
-POINT runtimeStructureTurretAnimScreenOffsetForRender(
-    const BuildingType& buildingType,
-    const std::string& structureType,
-    int footprintWidth,
-    int footprintHeight,
-    const RuntimeMapCamera& camera
-);
 
-POINT runtimeStructureBarrelRecoilScreenOffsetForRender(
-    const WorldObjectInstance& object,
-    const BuildingType& buildingType,
-    int animationTick
-);
+
+
 
 bool prewarmRuntimeStructureTurretVoxelFacingForRender(
     const std::string& structureType,
@@ -1701,14 +1520,89 @@ const RuntimeTmpSubTileImage* resolveRuntimeTerrainVisualCellImage(
     RuntimeMapRenderCache& cache, RuntimeTerrainVisualCellInfo* info = nullptr
 );
 
-RuntimeMapRenderStats drawRuntimeMap(
-    HDC dc,
-    const RECT& viewport,
-    const GameWorld& world,
-    const RuntimeMapRenderContext& context,
-    RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache
-);
+// Actual synchronous map-pass port. World/snapshots are read-only; camera and
+// cache keep their original owner and mutation policy. All borrows end before
+// the outer paint scope releases/resizes storage or changes cache nodes.
+// This is a drawing capability, not S38/S39's final frame Presenter.
+enum class RuntimeMapDrawingCapability : std::uint32_t { Unavailable, Available };
+class RuntimeMapDrawTarget {
+public:
+    virtual ~RuntimeMapDrawTarget() = default;
+    RuntimeMapDrawTarget(const RuntimeMapDrawTarget&) = delete;
+    RuntimeMapDrawTarget& operator=(const RuntimeMapDrawTarget&) = delete;
+    virtual RuntimeMapDrawingCapability capability() const noexcept = 0;
+    virtual RuntimeMapRenderStats drawMap(const RuntimeInputPixelRect& viewport,
+        const GameWorld& world, const RuntimeMapRenderContext& context,
+        RuntimeMapCamera& camera, RuntimeMapRenderCache& cache) = 0;
+protected:
+    RuntimeMapDrawTarget() = default;
+};
+// No extra clipping, validation, snapshots, allocation or resource lookup here:
+// preserve the selected backend's original return/exception/fallback policies.
+inline RuntimeMapRenderStats drawRuntimeMap(RuntimeMapDrawTarget& target,
+    const RuntimeInputPixelRect& viewport, const GameWorld& world,
+    const RuntimeMapRenderContext& context, RuntimeMapCamera& camera,
+    RuntimeMapRenderCache& cache) {
+    return target.drawMap(viewport, world, context, camera, cache);
+}
+
+
+// Synchronous auxiliary SHP pass; shares the original context/camera/cache
+// borrows and original missing-resource/clip/false/exception policies. This is
+// not a final-frame Presenter and does not retain any input after the call.
+class RuntimeAuxiliaryShpDrawTarget {
+public:
+    virtual ~RuntimeAuxiliaryShpDrawTarget() = default;
+    RuntimeAuxiliaryShpDrawTarget(const RuntimeAuxiliaryShpDrawTarget&) = delete;
+    RuntimeAuxiliaryShpDrawTarget& operator=(const RuntimeAuxiliaryShpDrawTarget&) = delete;
+    virtual RuntimeMapDrawingCapability capability() const noexcept = 0;
+    virtual bool drawFrame(const RuntimeInputPixelRect& viewport,
+        const RuntimeInputPixelPoint& center, const RuntimeMapRenderContext& context,
+        const RuntimeMapCamera& camera, RuntimeMapRenderCache& cache,
+        const std::string& imageId, int frameIndex, std::int32_t offsetX,
+        std::int32_t offsetY, bool mainFramesOnly) = 0;
+protected:
+    RuntimeAuxiliaryShpDrawTarget() = default;
+};
+// Deliberately no extra validation, clipping, allocation, cache reset or
+// early false return: even a false legacy draw may update diagnostics/trailers.
+inline bool drawRuntimeAuxiliaryShpFrame(RuntimeAuxiliaryShpDrawTarget& target,
+    const RuntimeInputPixelRect& viewport, const RuntimeInputPixelPoint& center,
+    const RuntimeMapRenderContext& context, const RuntimeMapCamera& camera,
+    RuntimeMapRenderCache& cache, const std::string& imageId, int frameIndex,
+    std::int32_t offsetX = 0, std::int32_t offsetY = 0, bool mainFramesOnly = false) {
+    return target.drawFrame(viewport, center, context, camera, cache, imageId,
+        frameIndex, offsetX, offsetY, mainFramesOnly);
+}
+
+// Private fixture implementation is Native; its public input is the existing standard context.
+bool runRuntimeAuxiliaryShpDrawingContract(const RuntimeMapRenderContext& context,
+    const std::string& output, std::string& error);
+
+// Synchronous whole-map shake pass. The existing offset/translation and
+// Native overlay segmentation stay in their original implementation owner.
+class RuntimeScreenShakeDrawTarget {
+public:
+    virtual ~RuntimeScreenShakeDrawTarget() = default;
+    RuntimeScreenShakeDrawTarget(const RuntimeScreenShakeDrawTarget&) = delete;
+    RuntimeScreenShakeDrawTarget& operator=(const RuntimeScreenShakeDrawTarget&) = delete;
+    virtual RuntimeMapDrawingCapability capability() const noexcept = 0;
+    virtual bool apply(const RuntimeInputPixelRect& viewport,
+        const RuntimeMapRenderContext& context, RuntimeMapRenderCache& cache) = 0;
+protected:
+    RuntimeScreenShakeDrawTarget() = default;
+};
+// No early viewport/offset validation: an unchanged false result can still
+// close a dynamic Native map segment, and the original backend chooses fallback.
+inline bool applyRuntimeScreenShake(RuntimeScreenShakeDrawTarget& target,
+    const RuntimeInputPixelRect& viewport, const RuntimeMapRenderContext& context,
+    RuntimeMapRenderCache& cache) {
+    return target.apply(viewport, context, cache);
+}
+
+// Private Native fixture implementation, using existing standard actual hit contexts.
+bool runRuntimeScreenShakeDrawingContract(const RuntimeMapRenderContext& active,
+    const RuntimeMapRenderContext& quiet, const std::string& output, std::string& error);
 
 bool resolveRuntimeTerrainRadarColors(
     const TerrainCell& cell,
@@ -1754,21 +1648,9 @@ RuntimeTerrainLandType resolveRuntimeTerrainSubTileLandType(
     RuntimeMapRenderCache& cache
 );
 
-bool resolveRuntimeSpawnedMissileSpriteBounds(
-    const WorldObjectInstance& object, const POINT& center,
-    const RuntimeMapRenderContext& context, const RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache, RECT& bounds
-);
 
-bool resolveRuntimeObjectShpSpriteBounds(
-    const WorldObjectInstance& object,
-    const POINT& center,
-    const RuntimeMapRenderContext& context,
-    const RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache,
-    RECT& spriteRect,
-    bool stableGlobalCanvas = false
-);
+
+
 
 // Capture the physical infantry's authored whole-canvas pivot relative to its
 // world draw point. Uses canonical art at standard 60/120 cameras, without
@@ -1783,11 +1665,7 @@ bool resolveRuntimeInfantryDeathCanvasPivotOffsets(
 
 // center is the object's actual projected draw point, including flight and
 // sub-cell offsets. Bounds contain the current visible pixels of all body parts.
-bool resolveRuntimeMobileObjectSpriteBounds(
-    const WorldObjectInstance& object, const POINT& center,
-    const RuntimeMapRenderContext& context, const RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache, RECT& spriteRect
-);
+
 
 // Capture the airborne body's opaque center at impact time. The affine pixel
 // correction preserves bitmap size and world projection at other camera scales;
@@ -1801,29 +1679,17 @@ bool resolveRuntimeAirImpactBodyCenterOffset(
     RuntimeParticleAirbornePresentation& presentation, int& spriteOffsetY
 );
 
-struct RuntimeStructureSpriteGeometry {
-    RECT bounds{};
-    std::vector<RuntimeSpriteHitSpan> hitSpans;
-    std::vector<RuntimeSpriteHitSpan> foregroundHitSpans;
-    int layerCount = 0;
-};
+
 
 // Replays base, buildup, bib, animated layers and independent turret/barrel
 // through their production frame/offset decisions. Shadows are excluded.
-bool resolveRuntimeStructureSpriteGeometry(
-    const WorldObjectInstance& object, const POINT& center,
-    const RuntimeMapRenderContext& context, const RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache, RuntimeStructureSpriteGeometry& geometry
-);
 
-bool runtimeSpriteHitSpansContain(const std::vector<RuntimeSpriteHitSpan>& spans, POINT point);
+
+
 
 // Fresh building-only visibility replay. A participating but fully occluded
 // building has an entry with no spans. False preserves the caller's fallback.
-bool resolveRuntimeBuildingVisibleHitSpans(const GameWorld& world, const RECT& viewport,
-    const RuntimeMapRenderContext& context, const RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache,
-    std::unordered_map<int, std::vector<RuntimeSpriteHitSpan>>& visibleSpans);
+
 
 // The audited flat-ground Drive/VXL branch only. Missing or exceptional
 // neighboring terrain metadata keeps the existing rendering path.
@@ -1836,55 +1702,18 @@ bool runtimeGroundInfantryUsesBuildingDepth(const WorldObjectInstance& object,
     const GameWorld& world, const RuntimeMapRenderContext& context,
     RuntimeMapRenderCache& cache);
 
-struct RuntimeObjectWorldRenderPlacement {
-    POINT center{};
-    POINT sortPoint{};
-    RECT bodyViewport{};
-    bool airborneForeground = false;
-    int factoryForegroundHostId = -1;
-};
+
 
 // Includes the final aircraft-over-building lift and producer-roof clipping.
-RuntimeObjectWorldRenderPlacement runtimeObjectWorldRenderPlacement(
-    const WorldObjectInstance& object, const GameWorld& world, const RECT& viewport,
-    const RuntimeMapRenderContext& context, const RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache
-);
 
-struct RuntimeMobileSpriteBoundsProbe {
-    RECT spriteBounds{};
-    RECT renderedBounds{};
-    int renderedPixels = 0;
-    int outsidePixels = 0;
-    int layerCount = 0;
-    bool resourceResolved = false;
-    bool exactMatch = false;
-    bool clipped = false;
-    std::string diagnostic;
-    // The isolated body render, for contact sheets and visual review.
-    std::vector<std::uint32_t> pixels;
-    int imageWidth = 0;
-    int imageHeight = 0;
-    POINT imageOrigin{};
-};
+
+
 
 // Test-only: runs the actual compositor on two backgrounds and checks every
 // changed pixel against the geometry query. Missing resources are failures.
-bool verifyRuntimeMobileObjectSpriteBounds(
-    const WorldObjectInstance& object, const POINT& center,
-    const RuntimeMapRenderContext& context, const RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache, RuntimeMobileSpriteBoundsProbe& probe
-);
 
-bool drawRuntimeObjectPreviewSprite(
-    HDC dc,
-    const RECT& viewport,
-    const WorldObjectInstance& object,
-    const RuntimeMapRenderContext& context,
-    const RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache,
-    RECT* spriteRect = nullptr
-);
+
+
 
 bool loadRuntimePaletteFile(
     const std::string& palettePath,
@@ -1932,7 +1761,7 @@ std::size_t releaseRuntimeAuxiliaryShpImageFromCache(
 // A palette shorter than the required256 entries returns an empty result.
 std::vector<RuntimePaletteColor> runtimeOwnerRemappedUiPalette(
     const std::vector<RuntimePaletteColor>& palette,
-    COLORREF ownerColor
+    RuntimeMapColorValue ownerColor
 );
 
 bool decodeRuntimePcxImageBytes(
@@ -1966,19 +1795,7 @@ bool decodeRuntimeShpFrameFile(
     std::string& errorMessage
 );
 
-bool drawRuntimeAuxiliaryShpFrame(
-    HDC dc,
-    const RECT& viewport,
-    const POINT& center,
-    const RuntimeMapRenderContext& context,
-    const RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache,
-    const std::string& imageId,
-    int frameIndex,
-    int offsetX = 0,
-    int offsetY = 0,
-    bool mainFramesOnly = false
-);
+
 
 bool dumpRuntimeVoxelAtlasForObject(
     const WorldObjectInstance& object,
@@ -2029,7 +1846,7 @@ int runtimeObjectShpFrameForGoldenCapture(const WorldObjectInstance& object,
     const RuntimeMapRenderContext& context, int frameCount);
 bool runRuntimeModExtensionRenderContractCheck(const RuntimeMapRenderContext& context, std::string& error);
 RuntimeScreenShakeOffset runtimeScreenShakeForRender(const RuntimeMapRenderContext& context);
-bool applyRuntimeScreenShake(HDC dc, const RECT& viewport, const RuntimeMapRenderContext& context, RuntimeMapRenderCache& cache);
+
 
 bool runRuntimeChaosRenderContractCheck(const RuntimeMapRenderContext& context, const GameWorld& world,
     const std::vector<RuntimeImpactRenderActor>& gasFrames, std::string& error);

@@ -1,0 +1,12 @@
+include_guard(GLOBAL)
+# Public complete-frame contract is pure; native interop stays in its own leaf.
+add_subdirectory(tests/rendering/software_frame)
+if(WIN32)
+    concord_add_profiled_leaf(concord_frame_presenter_win32 src/runtime/presentation/win32/FramePresenterWin32.cpp concord_runtime Runtime)
+    target_link_libraries(concord_runtime PRIVATE concord_frame_presenter_win32)
+    if(CONCORD_MSVC_FRONTEND)
+        concord_target_compile_options(concord_frame_presenter_win32 PRIVATE /W4 /WX)
+    endif()
+    add_subdirectory(tests/infrastructure/frame_presenter)
+    include("${CMAKE_CURRENT_LIST_DIR}/D3D11FramePresenter.cmake")
+endif()

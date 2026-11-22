@@ -1,4 +1,13 @@
-#include "render/core/RuntimeMapRenderer.h"
+#include "render/core/win32/RuntimeMapDrawingWin32.h"
+#include "render/geometry/win32/RuntimeRenderPlacementWin32.h"
+#include "render/core/RuntimeMapPixelRules.h"
+#include "ui/surface/win32/MapNativeOverlayWin32.h"
+#include "ui/surface/win32/MapCompositionWin32.h"
+#include "render/core/RuntimeMapTerrainFrameRenderer.h"
+#include "assets/codecs/RuntimeTmpCodec.h"
+#include "assets/terrain/RuntimeTerrainTmpQuery.h"
+#include "assets/codecs/ShpCodec.h"
+#include "assets/codecs/PalDecoder.h"
 #include "simulation/abilities/psionic/RuntimeDisguiseBlink.h"
 #include "audio/events/RuntimeSuperWeaponBuildingAudio.h"
 #include "simulation/production/RuntimeFactoryExitAnimation.h"
@@ -24,6 +33,7 @@
 #include "render/visibility/RuntimeShroudSparseBlur.h"
 #include "render/shadows/RuntimeShadowDibHalf.h"
 #include "render/buildings/RuntimeBuildingDepthEmptyScene.h"
+#include "render/buildings/RuntimeAuxiliaryAnimation.h"
 #include "render/shadows/RuntimeWaterWakeHistoryMaintenance.h"
 #include "render/core/RuntimeRendererEnvironment.h"
 #include "render/units/RuntimeInfantryDeathAnimation.h"
@@ -31,6 +41,11 @@
 #include "runtime/performance/RuntimePerfTrace.h"
 #include "render/voxel/RuntimeVoxelCornerProjectionMemo.h"
 #include "render/voxel/RuntimeVoxelLoadingPrewarm.h"
+#include "render/voxel/RuntimeGrandCannonPrewarm.h"
+#include "render/voxel/RuntimeGrandCannonPreparedFacing.h"
+#include "render/voxel/RuntimeGrandCannonPrewarmTestHooks.h"
+#include <thread>
+#include "render/voxel/GrandCannonRasterTask.h"
 #include "render/voxel/RuntimeFutureVoxelBootstrap.h"
 #include "ui/selection/diagnostics/RuntimePaintProjectionSignatureContractOracle.h"
 #include "render/shadows/RuntimeGroundShadowEligibility.h"
@@ -47,6 +62,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -70,8 +86,22 @@
 #pragma comment(lib, "gdiplus.lib")
 #endif
 
-RuntimeMapRenderContext::RuntimeMapRenderContext() = default;
-RuntimeMapRenderContext::~RuntimeMapRenderContext() = default;
+
+
+RuntimeMapRenderContext runtimeMapRenderContextForTerrainFrame(
+    const RuntimeMapTerrainFrame& frame) {
+    RuntimeMapRenderContext context;
+    context.theater = frame.theater;
+    context.art = frame.art;
+    context.rules = frame.rules;
+    context.mapFacts = frame.mapFacts;
+    context.vision = frame.vision;
+    context.visionObserverOwner = frame.visionObserverOwner;
+    context.lightingTint = &frame.lightingTint;
+    context.lightingProfile = frame.lightingProfile;
+    return context;
+}
+
 
 COLORREF runtimeBlendBlack(COLORREF color, int alpha);
 static bool runtimeFrameScalingReferenceForRender();
@@ -88,7 +118,11 @@ bool runtimeGrandCannonBarrelDrawsInFront(int facing) {
     return facingBucket >= 5 && facingBucket <= 20;
 }
 
+#include "render/core/detail/RuntimeProductionResources.h"
+
 namespace {
+using namespace concord::runtime::resource_detail;
+
 
 struct ProjectedPoint {
     int x = 0;
@@ -204,52 +238,9 @@ bool checkedMul(std::size_t left, std::size_t right, std::size_t& result) {
     return true;
 }
 
-int positiveModulo(int value, int modulus) {
-    if (modulus <= 0) {
-        return 0;
-    }
 
-    int result = value % modulus;
-    if (result < 0) {
-        result += modulus;
-    }
-    return result;
-}
 
-bool loadBytes(
-    const std::string& path,
-    std::vector<unsigned char>& bytes,
-    std::string& errorMessage
-) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input.is_open()) {
-        errorMessage = "failed to open file: " + path;
-        return false;
-    }
 
-    input.seekg(0, std::ios::end);
-    const std::streamoff size = input.tellg();
-    if (size < 0) {
-        errorMessage = "failed to get file size: " + path;
-        return false;
-    }
-
-    input.seekg(0, std::ios::beg);
-    bytes.resize(static_cast<std::size_t>(size));
-    if (!bytes.empty()) {
-        input.read(
-            reinterpret_cast<char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size())
-        );
-    }
-
-    if (!input && !bytes.empty()) {
-        errorMessage = "failed to read file: " + path;
-        return false;
-    }
-
-    return true;
-}
 
 unsigned int readUInt32(
     const std::vector<unsigned char>& bytes,
@@ -276,48 +267,13 @@ float readFloat32(const std::vector<unsigned char>& bytes, std::size_t offset) {
     return value;
 }
 
-unsigned int readUInt16(
-    const std::vector<unsigned char>& bytes,
-    std::size_t offset
-) {
-    if (offset + 2 > bytes.size()) {
-        return 0;
-    }
 
-    return static_cast<unsigned int>(bytes[offset])
-        | (static_cast<unsigned int>(bytes[offset + 1]) << 8);
-}
 
-int runtimeShpFrameCount(const std::vector<unsigned char>& bytes) {
-    if (bytes.size() < 8) {
-        return 0;
-    }
 
-    return static_cast<int>(readUInt16(bytes, 6));
-}
 
-int runtimeVisibleMainFrameCount(int frameCount, bool splitShadow) {
-    if (splitShadow && frameCount >= 2 && frameCount % 2 == 0) {
-        return std::max(1, frameCount / 2);
-    }
 
-    return std::max(1, frameCount);
-}
 
-int runtimeShpShadowFrameIndex(
-    int frameCount,
-    int visibleFrameIndex,
-    bool splitShadow
-) {
-    if (!splitShadow || frameCount < 2 || (frameCount % 2) != 0) {
-        return -1;
-    }
-    const int visibleFrameCount = frameCount / 2;
-    if (visibleFrameIndex < 0 || visibleFrameIndex >= visibleFrameCount) {
-        return -1;
-    }
-    return visibleFrameIndex + visibleFrameCount;
-}
+
 
 int signExtendUInt16(unsigned int value) {
     value &= 0xFFFFU;
@@ -328,46 +284,25 @@ int signExtendUInt16(unsigned int value) {
     return static_cast<int>(value) - 0x10000;
 }
 
-unsigned char scalePaletteChannel(unsigned char value, bool sixBitPalette) {
-    if (!sixBitPalette) {
-        return value;
-    }
-
-    // Westwood palettes expand 6-bit DAC channels by shifting, preserving
-    // their original four-level spacing (63 becomes 252, not 255).
-    return static_cast<unsigned char>(
-        static_cast<unsigned int>(value) << 2U
-    );
-}
-
 bool decodeRuntimePaletteBytes(
     const std::vector<unsigned char>& paletteBytes,
     std::vector<RuntimePaletteColor>& palette,
     std::string& errorMessage,
     const std::string& sourceName
 ) {
-    if (paletteBytes.size() != 768) {
+    concord::assets::PalRawPalette raw;
+    if (!concord::assets::decodePalBytes(
+            paletteBytes, raw, concord::assets::PalLengthPolicy::Exact768)) {
         errorMessage = "PAL file must be exactly 768 bytes: " + sourceName;
         return false;
     }
-
-    unsigned int maxChannel = 0;
-    for (const unsigned char value : paletteBytes) {
-        maxChannel = std::max(maxChannel, static_cast<unsigned int>(value));
-    }
-
-    const bool sixBitPalette = maxChannel <= 63;
+    const auto colors = concord::assets::mapPalColors(
+        raw, concord::assets::PalColorPolicy::DacShiftTwo);
     palette.clear();
     palette.reserve(256);
-    for (std::size_t i = 0; i < 256; ++i) {
-        const std::size_t offset = i * 3;
-        palette.push_back({
-            scalePaletteChannel(paletteBytes[offset], sixBitPalette),
-            scalePaletteChannel(paletteBytes[offset + 1], sixBitPalette),
-            scalePaletteChannel(paletteBytes[offset + 2], sixBitPalette)
-        });
+    for (const auto& color : colors) {
+        palette.push_back({color.r, color.g, color.b});
     }
-
     return true;
 }
 
@@ -389,247 +324,7 @@ bool loadRuntimePalette(
     );
 }
 
-bool decodeRuntimeShpFormat3Frame(
-    const std::vector<unsigned char>& bytes,
-    std::size_t dataOffset,
-    int width,
-    int height,
-    std::vector<unsigned char>& pixels,
-    std::string& errorMessage
-) {
-    pixels.assign(
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height),
-        0
-    );
 
-    std::size_t cursor = dataOffset;
-    for (int y = 0; y < height; ++y) {
-        if (cursor + 2 > bytes.size()) {
-            errorMessage = "SHP format 3 row table ended early.";
-            return false;
-        }
-
-        const std::size_t rowStart = cursor;
-        const std::size_t rowLength = readUInt16(bytes, cursor);
-        if (rowLength < 2) {
-            errorMessage = "SHP format 3 row has an invalid length.";
-            return false;
-        }
-
-        const std::size_t rowEnd = rowStart + rowLength;
-        if (rowEnd > bytes.size()) {
-            errorMessage = "SHP format 3 row extends past the end of the file.";
-            return false;
-        }
-
-        cursor += 2;
-        int x = 0;
-        while (cursor < rowEnd) {
-            const unsigned char value = bytes[cursor++];
-            if (value == 0) {
-                if (cursor >= rowEnd) {
-                    errorMessage = "SHP format 3 transparent run is truncated.";
-                    return false;
-                }
-
-                x += bytes[cursor++];
-                continue;
-            }
-
-            if (x >= 0 && x < width) {
-                pixels[
-                    (static_cast<std::size_t>(y) * static_cast<std::size_t>(width))
-                    + static_cast<std::size_t>(x)
-                ] = value;
-            }
-            ++x;
-        }
-
-        cursor = rowEnd;
-    }
-
-    return true;
-}
-
-bool decodeRuntimeShpFormat2Frame(
-    const std::vector<unsigned char>& bytes,
-    std::size_t dataOffset,
-    int width,
-    int height,
-    std::vector<unsigned char>& pixels,
-    std::string& errorMessage
-) {
-    const std::size_t pixelCount =
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-    pixels.assign(pixelCount, 0);
-
-    std::size_t cursor = dataOffset;
-    for (int y = 0; y < height; ++y) {
-        if (cursor + 2 > bytes.size()) {
-            errorMessage = "SHP format 2 row header is truncated";
-            return false;
-        }
-
-        const int rowLength = static_cast<int>(readUInt16(bytes, cursor));
-        cursor += 2;
-        if (rowLength < 2) {
-            errorMessage = "SHP format 2 row length is invalid";
-            return false;
-        }
-
-        const int rowDataLength = rowLength - 2;
-        if (cursor + static_cast<std::size_t>(rowDataLength) > bytes.size()) {
-            errorMessage = "SHP format 2 row data is truncated";
-            return false;
-        }
-
-        const int copyLength = std::min(width, rowDataLength);
-        if (copyLength > 0) {
-            const std::size_t rowStart =
-                static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
-            std::copy_n(
-                bytes.begin() + static_cast<std::ptrdiff_t>(cursor),
-                copyLength,
-                pixels.begin() + static_cast<std::ptrdiff_t>(rowStart)
-            );
-        }
-        cursor += static_cast<std::size_t>(rowDataLength);
-    }
-
-    return true;
-}
-
-bool decodeRuntimeShpFrameFromBytes(
-    const std::vector<unsigned char>& bytes,
-    const std::string& sourceName,
-    int frameIndex,
-    RuntimeShpFrameImage& image,
-    std::string& errorMessage
-) {
-    image.shadowMaskSpanCache.invalidate();
-    constexpr std::size_t fileHeaderBytes = 8;
-    constexpr std::size_t frameHeaderBytes = 24;
-    if (bytes.size() < fileHeaderBytes + frameHeaderBytes) {
-        errorMessage = "SHP file is too small for a frame table: " + sourceName;
-        return false;
-    }
-
-    const unsigned int frameCount = readUInt16(bytes, 6);
-    if (frameCount == 0) {
-        errorMessage = "SHP file has no frames: " + sourceName;
-        return false;
-    }
-
-    if (frameIndex < 0 || static_cast<unsigned int>(frameIndex) >= frameCount) {
-        errorMessage =
-            "SHP frame "
-            + std::to_string(frameIndex)
-            + " is outside the frame table ("
-            + std::to_string(frameCount)
-            + " frames): "
-            + sourceName;
-        return false;
-    }
-
-    const std::size_t frameOffset =
-        fileHeaderBytes + (static_cast<std::size_t>(frameIndex) * frameHeaderBytes);
-    if (frameOffset + frameHeaderBytes > bytes.size()) {
-        errorMessage = "SHP frame table is truncated: " + sourceName;
-        return false;
-    }
-
-    const int globalWidth = signExtendUInt16(readUInt16(bytes, 2));
-    const int globalHeight = signExtendUInt16(readUInt16(bytes, 4));
-    const int offsetX = signExtendUInt16(readUInt16(bytes, frameOffset));
-    const int offsetY = signExtendUInt16(readUInt16(bytes, frameOffset + 2));
-    const int width = signExtendUInt16(readUInt16(bytes, frameOffset + 4));
-    const int height = signExtendUInt16(readUInt16(bytes, frameOffset + 6));
-    const unsigned int format = bytes[frameOffset + 8];
-    const std::size_t dataOffset = readUInt32(bytes, frameOffset + 20);
-
-    // Original NGTBNK.SHP and award animations use empty format-4 frames;
-    // MONEY.SHP also ends with an empty format-3 frame. Both have zero size
-    // and no data. MGUN directional sprites also interleave empty raw format-1
-    // frames. NUKEDIE also ends with an empty raw format-0 frame. Preserve
-    // those authored pauses instead of reporting missing art.
-    if (globalWidth > 0 && globalHeight > 0 && width == 0 && height == 0
-        && (format <= 1 || format == 3 || format == 4) && dataOffset == 0) {
-        image = RuntimeShpFrameImage{};
-        image.globalWidth = globalWidth; image.globalHeight = globalHeight;
-        image.sourcePath = sourceName;
-        return true;
-    }
-    if (globalWidth <= 0
-        || globalHeight <= 0
-        || width <= 0
-        || height <= 0
-        || width > 4096
-        || height > 4096) {
-        errorMessage = "SHP frame dimensions are unsupported: " + sourceName;
-        return false;
-    }
-
-    if (dataOffset >= bytes.size()) {
-        errorMessage = "SHP frame data offset is outside the file: " + sourceName;
-        return false;
-    }
-
-    std::vector<unsigned char> pixels;
-    if (format <= 1) {
-        const std::size_t pixelCount =
-            static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-        if (dataOffset + pixelCount > bytes.size()) {
-            errorMessage = "SHP raw frame is shorter than expected: " + sourceName;
-            return false;
-        }
-
-        pixels.assign(
-            bytes.begin() + static_cast<std::ptrdiff_t>(dataOffset),
-            bytes.begin() + static_cast<std::ptrdiff_t>(dataOffset + pixelCount)
-        );
-    } else if (format == 2) {
-        if (!decodeRuntimeShpFormat2Frame(
-                bytes,
-                dataOffset,
-                width,
-                height,
-                pixels,
-                errorMessage
-            )) {
-            errorMessage += " Path: " + sourceName;
-            return false;
-        }
-    } else if (format == 3) {
-        if (!decodeRuntimeShpFormat3Frame(
-                bytes,
-                dataOffset,
-                width,
-                height,
-                pixels,
-                errorMessage
-            )) {
-            errorMessage += " Path: " + sourceName;
-            return false;
-        }
-    } else {
-        errorMessage =
-            "Unsupported SHP frame format "
-            + std::to_string(format)
-            + ": "
-            + sourceName;
-        return false;
-    }
-
-    image.offsetX = offsetX;
-    image.offsetY = offsetY;
-    image.globalWidth = globalWidth;
-    image.globalHeight = globalHeight;
-    image.width = width;
-    image.height = height;
-    image.pixels = std::move(pixels);
-    image.sourcePath = sourceName;
-    return true;
-}
 
 bool decodeRuntimeShpFrame(
     const std::string& shpPath,
@@ -651,676 +346,11 @@ bool decodeRuntimeShpFrame(
     );
 }
 
-std::size_t findNextTmpImageOffset(
-    const std::vector<std::size_t>& imageOffsets,
-    std::size_t currentOffset,
-    std::size_t fileSize
-) {
-    std::size_t nextOffset = fileSize;
-    for (const std::size_t candidate : imageOffsets) {
-        if (candidate > currentOffset && candidate < nextOffset) {
-            nextOffset = candidate;
-        }
-    }
 
-    return nextOffset;
-}
 
-bool isValidTmpImageOffset(
-    std::size_t imageOffset,
-    std::size_t tableEnd,
-    std::size_t fileSize
-) {
-    return imageOffset >= tableEnd && imageOffset < fileSize;
-}
 
-bool validateTmpImageOffsets(
-    const std::vector<std::size_t>& imageOffsets,
-    std::size_t tableEnd,
-    std::size_t fileSize,
-    const std::string& path,
-    std::string& errorMessage
-) {
-    for (const std::size_t imageOffset : imageOffsets) {
-        if (imageOffset == 0) {
-            continue;
-        }
 
-        if (!isValidTmpImageOffset(imageOffset, tableEnd, fileSize)) {
-            errorMessage = "TMP image offset is outside file: " + path;
-            return false;
-        }
-    }
 
-    return true;
-}
-
-bool decodeTmpImagePixels(
-    const std::vector<unsigned char>& bytes,
-    std::size_t imageOffset,
-    std::size_t imageRecordEnd,
-    unsigned int blockWidth,
-    unsigned int blockHeight,
-    RuntimeTmpSubTileImage& image,
-    std::string& errorMessage
-) {
-    constexpr std::size_t imageHeaderBytes = 52;
-
-    if (blockWidth == 0 || blockHeight == 0 || imageRecordEnd <= imageOffset) {
-        errorMessage = "TMP tile has invalid image dimensions.";
-        return false;
-    }
-
-    std::size_t baseColorBytes = 0;
-    unsigned int rowWidth = 4;
-    for (unsigned int y = 0; y < blockHeight; ++y) {
-        if (rowWidth > blockWidth) {
-            errorMessage = "TMP packed diamond row is wider than the tile image.";
-            return false;
-        }
-
-        baseColorBytes += rowWidth;
-        if (y < (blockHeight / 2) - 1) {
-            rowWidth += 4;
-        } else {
-            rowWidth -= 4;
-        }
-    }
-
-    if (baseColorBytes == 0) {
-        errorMessage = "TMP base color data is empty.";
-        return false;
-    }
-
-    const std::size_t imageRecordBytes = imageRecordEnd - imageOffset;
-    if (imageRecordBytes < imageHeaderBytes + baseColorBytes) {
-        errorMessage = "TMP image record is too small for base pixels.";
-        return false;
-    }
-
-    const int rawBaseOffsetX = readInt32(bytes, imageOffset);
-    const int rawBaseOffsetY = readInt32(bytes, imageOffset + 4);
-    const unsigned int dataBlockSize = readUInt32(bytes, imageOffset + 16);
-    const int rawExtraOffsetX = readInt32(bytes, imageOffset + 20);
-    const int rawExtraOffsetY = readInt32(bytes, imageOffset + 24);
-    const unsigned int extraWidth = readUInt32(bytes, imageOffset + 28);
-    const unsigned int extraHeight = readUInt32(bytes, imageOffset + 32);
-    const unsigned int flags = readUInt32(bytes, imageOffset + 36);
-    const unsigned char terrainType = bytes[imageOffset + 41];
-    const unsigned char rampType = bytes[imageOffset + 42];
-    const RuntimePaletteColor radarLeft{
-        bytes[imageOffset + 43],
-        bytes[imageOffset + 44],
-        bytes[imageOffset + 45]
-    };
-    const RuntimePaletteColor radarRight{
-        bytes[imageOffset + 46],
-        bytes[imageOffset + 47],
-        bytes[imageOffset + 48]
-    };
-
-    constexpr unsigned int tmpImageFlagExtraData = 1U;
-    constexpr unsigned int tmpImageFlagZData = 2U;
-
-    std::size_t extraPixelCount = 0;
-    const bool hasBaseZData = (flags & tmpImageFlagZData) != 0;
-    const bool hasExtra =
-        (flags & tmpImageFlagExtraData) != 0
-        && extraWidth > 0
-        && extraHeight > 0
-        && extraWidth <= 512
-        && extraHeight <= 512
-        && checkedMul(
-            static_cast<std::size_t>(extraWidth),
-            static_cast<std::size_t>(extraHeight),
-            extraPixelCount
-        );
-    const std::size_t basePixelDataOffset = imageOffset + imageHeaderBytes;
-    const std::size_t zDataOffset =
-        imageHeaderBytes + baseColorBytes;
-    const std::size_t extraDataOffset =
-        zDataOffset + (hasBaseZData ? baseColorBytes : 0);
-    const std::size_t extraZDataOffset =
-        extraDataOffset + (hasExtra ? extraPixelCount : 0);
-    if (hasBaseZData
-        && zDataOffset + baseColorBytes > imageRecordBytes) {
-        errorMessage = "TMP z-data extends past the image record.";
-        return false;
-    }
-    if (hasExtra
-        && extraDataOffset + extraPixelCount > imageRecordBytes) {
-        errorMessage = "TMP extra data extends past the image record.";
-        return false;
-    }
-
-    const int baseOffsetX = 0;
-    const int baseOffsetY = 0;
-    const int extraOffsetX = rawExtraOffsetX - rawBaseOffsetX;
-    const int extraOffsetY = rawExtraOffsetY - rawBaseOffsetY;
-
-    int minX = baseOffsetX;
-    int minY = baseOffsetY;
-    int maxX = baseOffsetX + static_cast<int>(blockWidth);
-    int maxY = baseOffsetY + static_cast<int>(blockHeight);
-
-    if (hasExtra) {
-        minX = std::min(minX, extraOffsetX);
-        minY = std::min(minY, extraOffsetY);
-        maxX = std::max(maxX, extraOffsetX + static_cast<int>(extraWidth));
-        maxY = std::max(maxY, extraOffsetY + static_cast<int>(extraHeight));
-    }
-
-    if (maxX <= minX || maxY <= minY) {
-        errorMessage = "TMP image bounds are invalid.";
-        return false;
-    }
-
-    image.present = true;
-    image.hasTerrainType = true;
-    image.terrainType = terrainType;
-    image.rampType = rampType;
-    image.hasRadarColors = true;
-    image.radarLeft = radarLeft;
-    image.radarRight = radarRight;
-    image.offsetX = minX;
-    image.offsetY = minY;
-    image.width = maxX - minX;
-    image.height = maxY - minY;
-    image.baseOffsetX = baseOffsetX;
-    image.baseOffsetY = baseOffsetY;
-    image.baseWidth = static_cast<int>(blockWidth);
-    image.baseHeight = static_cast<int>(blockHeight);
-    image.basePixels.assign(baseColorBytes, 0);
-    image.baseZData.clear();
-    image.hasBaseZData = hasBaseZData;
-    if (hasBaseZData) {
-        const std::size_t zDataAbsoluteOffset =
-            imageOffset + static_cast<std::size_t>(zDataOffset);
-        image.baseZData.assign(
-            bytes.begin() + static_cast<std::ptrdiff_t>(zDataAbsoluteOffset),
-            bytes.begin() + static_cast<std::ptrdiff_t>(zDataAbsoluteOffset + baseColorBytes)
-        );
-    }
-    image.hasExtra = hasExtra;
-    image.extraOffsetX = extraOffsetX;
-    image.extraOffsetY = extraOffsetY;
-    image.extraWidth = hasExtra ? static_cast<int>(extraWidth) : 0;
-    image.extraHeight = hasExtra ? static_cast<int>(extraHeight) : 0;
-    image.extraPixels.clear();
-    image.extraZData.clear();
-    image.hasExtraZData = false;
-    image.pixels.assign(
-        static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height),
-        0
-    );
-
-    std::size_t sourceIndex = basePixelDataOffset;
-    std::size_t packedBaseIndex = 0;
-    rowWidth = 4;
-    for (unsigned int y = 0; y < blockHeight; ++y) {
-        const unsigned int xStart = (blockWidth - rowWidth) / 2;
-        for (unsigned int x = 0; x < rowWidth; ++x) {
-            const unsigned char paletteIndex = bytes[sourceIndex];
-            ++sourceIndex;
-            image.basePixels[packedBaseIndex] = paletteIndex;
-            ++packedBaseIndex;
-            if (paletteIndex == 0) {
-                continue;
-            }
-
-            const int targetX = baseOffsetX - minX + static_cast<int>(xStart + x);
-            const int targetY = baseOffsetY - minY + static_cast<int>(y);
-            image.pixels[
-                (static_cast<std::size_t>(targetY) * image.width)
-                + static_cast<std::size_t>(targetX)
-            ] = paletteIndex;
-        }
-
-        if (y < (blockHeight / 2) - 1) {
-            rowWidth += 4;
-        } else {
-            rowWidth -= 4;
-        }
-    }
-
-    if (hasExtra) {
-        image.extraPixels.assign(extraPixelCount, 0);
-        image.hasExtraZData =
-            hasBaseZData
-            && dataBlockSize > 0
-            && extraZDataOffset + extraPixelCount <= imageRecordBytes;
-        if (image.hasExtraZData) {
-            const std::size_t extraZDataAbsoluteOffset =
-                imageOffset + extraZDataOffset;
-            image.extraZData.assign(
-                bytes.begin() + static_cast<std::ptrdiff_t>(extraZDataAbsoluteOffset),
-                bytes.begin() + static_cast<std::ptrdiff_t>(extraZDataAbsoluteOffset + extraPixelCount)
-            );
-        }
-
-        const std::size_t extraPixelDataOffset = imageOffset + extraDataOffset;
-        for (unsigned int y = 0; y < extraHeight; ++y) {
-            for (unsigned int x = 0; x < extraWidth; ++x) {
-                const unsigned char paletteIndex =
-                    bytes[
-                        extraPixelDataOffset
-                        + (static_cast<std::size_t>(y) * extraWidth)
-                        + x
-                    ];
-                image.extraPixels[
-                    (static_cast<std::size_t>(y) * extraWidth) + x
-                ] = paletteIndex;
-                if (paletteIndex == 0) {
-                    continue;
-                }
-
-                const int targetX = extraOffsetX - minX + static_cast<int>(x);
-                const int targetY = extraOffsetY - minY + static_cast<int>(y);
-                if (targetX < 0
-                    || targetY < 0
-                    || targetX >= image.width
-                    || targetY >= image.height) {
-                    errorMessage = "TMP extra pixels fall outside computed bounds.";
-                    return false;
-                }
-
-                image.pixels[
-                    (static_cast<std::size_t>(targetY) * image.width)
-                    + static_cast<std::size_t>(targetX)
-                ] = paletteIndex;
-            }
-        }
-    }
-
-    return true;
-}
-
-bool decodeRawTmpFormat3Pixels(
-    const std::vector<unsigned char>& bytes,
-    std::size_t dataOffset,
-    std::size_t dataEnd,
-    unsigned int width,
-    unsigned int height,
-    std::vector<unsigned char>& pixels,
-    std::string& errorMessage
-) {
-    if (dataOffset >= dataEnd || dataEnd > bytes.size()) {
-        errorMessage = "TMP raw image data bounds are invalid.";
-        return false;
-    }
-
-    pixels.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0);
-
-    std::size_t cursor = dataOffset;
-    for (unsigned int y = 0; y < height; ++y) {
-        if (cursor + 2 > dataEnd) {
-            errorMessage = "TMP raw format 3 row table ended early.";
-            return false;
-        }
-
-        const std::size_t rowStart = cursor;
-        const std::size_t rowLength = readUInt16(bytes, cursor);
-        if (rowLength < 2) {
-            errorMessage = "TMP raw format 3 row has an invalid length.";
-            return false;
-        }
-
-        const std::size_t rowEnd = rowStart + rowLength;
-        if (rowEnd < rowStart || rowEnd > dataEnd) {
-            errorMessage = "TMP raw format 3 row extends past the image record.";
-            return false;
-        }
-
-        cursor += 2;
-        unsigned int x = 0;
-        while (cursor < rowEnd) {
-            const unsigned char value = bytes[cursor++];
-            if (value != 0) {
-                if (x >= width) {
-                    errorMessage = "TMP raw format 3 row contains too many opaque pixels.";
-                    return false;
-                }
-
-                pixels[(static_cast<std::size_t>(y) * width) + x] = value;
-                ++x;
-                continue;
-            }
-
-            if (cursor >= rowEnd) {
-                errorMessage = "TMP raw format 3 transparent run is truncated.";
-                return false;
-            }
-
-            unsigned int runLength = bytes[cursor++];
-            if (x + runLength > width) {
-                runLength = width - x;
-            }
-
-            x += runLength;
-        }
-
-        cursor = rowEnd;
-    }
-
-    return true;
-}
-
-bool loadRawTmpTileFile(
-    const std::vector<unsigned char>& bytes,
-    const std::string& path,
-    RuntimeTmpTileFile& tileFile,
-    std::string& errorMessage
-) {
-    constexpr std::size_t preludeBytes = 8;
-    constexpr std::size_t slotRecordBytes = 24;
-    constexpr std::size_t dataOffsetOffset = 20;
-
-    // This compatibility format stores SHP pixel dimensions and frame slots,
-    // not the two-dimensional terrain grid found in a standard TMP header.
-    tileFile.gridWidth = 0;
-    tileFile.gridHeight = 0;
-
-    if (bytes.size() < preludeBytes + slotRecordBytes) {
-        errorMessage = "TMP raw slot table is too small: " + path;
-        return false;
-    }
-
-    const unsigned int headerWidth = readUInt16(bytes, 2);
-    const unsigned int headerHeight = readUInt16(bytes, 4);
-    const unsigned int headerSlotCount = readUInt16(bytes, 6);
-
-    std::size_t firstDataOffset = 0;
-    for (
-        std::size_t offsetField = preludeBytes + dataOffsetOffset;
-        offsetField + 4 <= bytes.size();
-        offsetField += slotRecordBytes
-    ) {
-        const unsigned int candidate = readUInt32(bytes, offsetField);
-        if (candidate > preludeBytes
-            && candidate < bytes.size()
-            && ((static_cast<std::size_t>(candidate) - preludeBytes) % slotRecordBytes) == 0
-            && (firstDataOffset == 0 || candidate < firstDataOffset)
-        ) {
-            firstDataOffset = static_cast<std::size_t>(candidate);
-        }
-    }
-
-    if (firstDataOffset == 0 || firstDataOffset <= preludeBytes) {
-        errorMessage = "TMP file has unsupported block dimensions: " + path;
-        return false;
-    }
-
-    const std::size_t tableBytes = firstDataOffset - preludeBytes;
-    if (tableBytes % slotRecordBytes != 0) {
-        errorMessage = "TMP raw slot table size is not aligned: " + path;
-        return false;
-    }
-
-    const std::size_t slotCount = tableBytes / slotRecordBytes;
-    if (slotCount == 0 || slotCount > 4096) {
-        errorMessage = "TMP raw slot count is unsupported: " + path;
-        return false;
-    }
-    if (headerSlotCount != 0 && headerSlotCount != slotCount) {
-        errorMessage = "TMP raw slot count disagrees with header: " + path;
-        return false;
-    }
-
-    std::vector<std::size_t> imageOffsets(slotCount, 0);
-    std::vector<std::pair<unsigned int, unsigned int>> dimensions(slotCount, {0, 0});
-    std::vector<std::pair<int, int>> imageAnchors(slotCount, {0, 0});
-    unsigned int maxWidth = 0;
-    unsigned int maxHeight = 0;
-
-    for (std::size_t i = 0; i < slotCount; ++i) {
-        const std::size_t recordOffset = preludeBytes + (i * slotRecordBytes);
-        const unsigned int packedAnchor = readUInt32(bytes, recordOffset);
-        const unsigned int packedDimensions = readUInt32(bytes, recordOffset + 4);
-        const unsigned int width = packedDimensions & 0xFFFFU;
-        const unsigned int height = (packedDimensions >> 16) & 0xFFFFU;
-        const unsigned int dataOffset = readUInt32(bytes, recordOffset + dataOffsetOffset);
-
-        if (dataOffset == 0) {
-            continue;
-        }
-
-        if (dataOffset < firstDataOffset || dataOffset >= bytes.size()) {
-            errorMessage = "TMP raw image offset is outside file: " + path;
-            return false;
-        }
-
-        if (width == 0 || height == 0 || width > 512 || height > 512) {
-            errorMessage = "TMP raw image dimensions are unsupported: " + path;
-            return false;
-        }
-
-        imageOffsets[i] = static_cast<std::size_t>(dataOffset);
-        dimensions[i] = {width, height};
-        imageAnchors[i] = {
-            signExtendUInt16(packedAnchor & 0xFFFFU),
-            signExtendUInt16((packedAnchor >> 16) & 0xFFFFU)
-        };
-        maxWidth = std::max(maxWidth, width);
-        maxHeight = std::max(maxHeight, height);
-    }
-
-    tileFile.blockWidth = headerWidth > 0
-        ? static_cast<int>(headerWidth)
-        : static_cast<int>(maxWidth);
-    tileFile.blockHeight = headerHeight > 0
-        ? static_cast<int>(headerHeight)
-        : static_cast<int>(maxHeight);
-    tileFile.images.assign(slotCount, RuntimeTmpSubTileImage{});
-
-    int decodedImages = 0;
-    std::string firstImageDecodeWarning;
-    for (std::size_t i = 0; i < slotCount; ++i) {
-        const std::size_t imageOffset = imageOffsets[i];
-        if (imageOffset == 0) {
-            continue;
-        }
-
-        const std::size_t imageRecordEnd =
-            findNextTmpImageOffset(imageOffsets, imageOffset, bytes.size());
-        std::vector<unsigned char> pixels;
-        if (!decodeRawTmpFormat3Pixels(
-                bytes,
-                imageOffset,
-                imageRecordEnd,
-                dimensions[i].first,
-                dimensions[i].second,
-                pixels,
-                errorMessage
-            )
-        ) {
-            if (firstImageDecodeWarning.empty()) {
-                firstImageDecodeWarning =
-                    errorMessage + " slot=" + std::to_string(i)
-                    + " path=" + path;
-            }
-            continue;
-        }
-
-        RuntimeTmpSubTileImage& image = tileFile.images[i];
-        image.present = true;
-        image.offsetX = imageAnchors[i].first;
-        image.offsetY = imageAnchors[i].second;
-        image.width = static_cast<int>(dimensions[i].first);
-        image.height = static_cast<int>(dimensions[i].second);
-        image.globalWidth = tileFile.blockWidth;
-        image.globalHeight = tileFile.blockHeight;
-        image.pixels = std::move(pixels);
-        image.baseOffsetX = 0;
-        image.baseOffsetY = 0;
-        image.baseWidth = 0;
-        image.baseHeight = 0;
-        image.basePixels.clear();
-        image.baseZData.clear();
-        image.hasBaseZData = false;
-        image.hasExtra = false;
-        image.extraOffsetX = 0;
-        image.extraOffsetY = 0;
-        image.extraWidth = 0;
-        image.extraHeight = 0;
-        image.extraPixels.clear();
-        image.extraZData.clear();
-        image.hasExtraZData = false;
-        ++decodedImages;
-    }
-
-    if (decodedImages <= 0) {
-        errorMessage = firstImageDecodeWarning.empty()
-            ? "TMP raw file did not contain any decodable images: " + path
-            : firstImageDecodeWarning;
-        return false;
-    }
-    errorMessage = firstImageDecodeWarning;
-    return true;
-}
-
-bool loadRuntimeTmpTileBytes(
-    const std::vector<unsigned char>& bytes,
-    const std::string& sourceName,
-    RuntimeTmpTileFile& tileFile,
-    std::string& errorMessage
-) {
-    constexpr std::size_t headerBytes = 16;
-    constexpr std::size_t offsetBytes = 4;
-
-    const std::string& path = sourceName;
-
-    if (bytes.size() < headerBytes + offsetBytes) {
-        errorMessage = "TMP file is too small: " + path;
-        return false;
-    }
-
-    const unsigned int xBlocks = readUInt32(bytes, 0);
-    const unsigned int yBlocks = readUInt32(bytes, 4);
-    const unsigned int blockWidth = readUInt32(bytes, 8);
-    const unsigned int blockHeight = readUInt32(bytes, 12);
-
-    if (
-        xBlocks == 0
-        || yBlocks == 0
-        || xBlocks > 64
-        || yBlocks > 64
-        || blockWidth == 0
-        || blockHeight == 0
-        || blockWidth > 512
-        || blockHeight > 512
-    ) {
-        return loadRawTmpTileFile(bytes, path, tileFile, errorMessage);
-    }
-
-    std::size_t slotCount = 0;
-    if (!checkedMul(static_cast<std::size_t>(xBlocks), static_cast<std::size_t>(yBlocks), slotCount)) {
-        errorMessage = "TMP slot count overflows: " + path;
-        return false;
-    }
-
-    std::size_t tableBytes = 0;
-    if (!checkedMul(slotCount, offsetBytes, tableBytes)) {
-        errorMessage = "TMP offset table size overflows: " + path;
-        return false;
-    }
-
-    std::size_t tableEnd = 0;
-    if (!checkedAdd(headerBytes, tableBytes, tableEnd) || tableEnd > bytes.size()) {
-        errorMessage = "TMP offset table points beyond file: " + path;
-        return false;
-    }
-
-    tileFile.blockWidth = static_cast<int>(blockWidth);
-    tileFile.blockHeight = static_cast<int>(blockHeight);
-    tileFile.gridWidth = static_cast<int>(xBlocks);
-    tileFile.gridHeight = static_cast<int>(yBlocks);
-    tileFile.images.assign(slotCount, RuntimeTmpSubTileImage{});
-
-    std::vector<std::size_t> imageOffsets(slotCount, 0);
-    for (std::size_t i = 0; i < slotCount; ++i) {
-        const unsigned int rawOffset = readUInt32(bytes, headerBytes + (i * offsetBytes));
-        if (rawOffset == 0) {
-            continue;
-        }
-
-        imageOffsets[i] = static_cast<std::size_t>(rawOffset);
-    }
-
-    if (!validateTmpImageOffsets(imageOffsets, tableEnd, bytes.size(), path, errorMessage)) {
-        return false;
-    }
-
-    for (std::size_t i = 0; i < slotCount; ++i) {
-        const std::size_t imageOffset = imageOffsets[i];
-        if (imageOffset == 0) {
-            continue;
-        }
-
-        const std::size_t imageRecordEnd =
-            findNextTmpImageOffset(imageOffsets, imageOffset, bytes.size());
-        if (!decodeTmpImagePixels(
-                bytes,
-                imageOffset,
-                imageRecordEnd,
-                blockWidth,
-                blockHeight,
-                tileFile.images[i],
-                errorMessage
-            )
-        ) {
-            errorMessage += " path=" + path;
-            return false;
-        }
-    }
-
-    return true;
-}
-
-bool loadRuntimeTmpTileFile(
-    const std::string& path,
-    RuntimeTmpTileFile& tileFile,
-    std::string& errorMessage
-) {
-    std::vector<unsigned char> bytes;
-    if (!loadBytes(path, bytes, errorMessage)) {
-        return false;
-    }
-
-    return loadRuntimeTmpTileBytes(bytes, path, tileFile, errorMessage);
-}
-
-std::string toLowerAscii(std::string value) {
-    for (char& character : value) {
-        character = static_cast<char>(
-            std::tolower(static_cast<unsigned char>(character))
-        );
-    }
-    return value;
-}
-
-std::string trimAsciiForRender(const std::string& value) {
-    const auto isNotSpace = [](unsigned char character) {
-        return !std::isspace(character);
-    };
-    const auto begin = std::find_if(
-        value.begin(),
-        value.end(),
-        isNotSpace
-    );
-    if (begin == value.end()) {
-        return {};
-    }
-    const auto end = std::find_if(
-        value.rbegin(),
-        value.rend(),
-        isNotSpace
-    ).base();
-    return std::string(begin, end);
-}
-
-bool containsText(const std::string& haystack, const std::string& needle) {
-    return haystack.find(needle) != std::string::npos;
-}
 
 double runtimeEnvDouble(
     const char* name,
@@ -1704,54 +734,11 @@ std::string runtimeVxlSizingCacheToken(const RuntimeVxlRasterSizing& sizing) {
     return stream.str();
 }
 
-std::string fileNameForShpImageId(const std::string& imageId) {
-    if (imageId.empty()) {
-        return "";
-    }
 
-    const std::string lower = toLowerAscii(imageId);
-    if (!std::filesystem::path(lower).extension().empty()) {
-        return imageId;
-    }
 
-    return imageId + ".shp";
-}
 
-bool runtimeFileNameHasExtension(
-    const std::string& fileName,
-    const std::string& extension
-) {
-    if (fileName.empty() || extension.empty()) {
-        return false;
-    }
 
-    return toLowerAscii(std::filesystem::path(fileName).extension().string())
-        == toLowerAscii(extension);
-}
 
-bool runtimeAuxiliaryResourceUsesShpBytes(
-    const std::string& fileName,
-    const ArtType* artType
-) {
-    if (runtimeFileNameHasExtension(fileName, ".shp")
-        || runtimeFileNameHasExtension(fileName, ".sha")) {
-        return true;
-    }
-    if (artType == nullptr || !artType->theater) {
-        return false;
-    }
-
-    static constexpr std::array<const char*, 6> theaterExtensions{
-        ".tem", ".sno", ".urb", ".des", ".lun", ".ubn"
-    };
-    return std::any_of(
-        theaterExtensions.begin(),
-        theaterExtensions.end(),
-        [&fileName](const char* extension) {
-            return runtimeFileNameHasExtension(fileName, extension);
-        }
-    );
-}
 
 std::string fileNameForVxlImageId(const std::string& imageId) {
     if (imageId.empty()) {
@@ -1781,822 +768,57 @@ std::string fileNameForHvaImageId(const std::string& imageId) {
     return imageId + ".hva";
 }
 
-bool findFileByNameCaseInsensitive(
-    const std::string& rootPath,
-    const std::string& fileName,
-    std::string& resolvedPath
-) {
-    if (rootPath.empty() || fileName.empty()) {
-        return false;
-    }
-
-    const std::filesystem::path root(rootPath);
-    std::error_code errorCode;
-    if (!std::filesystem::exists(root, errorCode)) {
-        return false;
-    }
-
-    const std::string targetFileName = toLowerAscii(fileName);
-    if (std::filesystem::is_regular_file(root, errorCode)) {
-        if (toLowerAscii(root.filename().string()) == targetFileName) {
-            resolvedPath = root.generic_string();
-            return true;
-        }
-        return false;
-    }
-
-    if (!std::filesystem::is_directory(root, errorCode)) {
-        return false;
-    }
-
-    std::filesystem::recursive_directory_iterator iterator(
-        root,
-        std::filesystem::directory_options::skip_permission_denied,
-        errorCode
-    );
-    const std::filesystem::recursive_directory_iterator end;
-    while (!errorCode && iterator != end) {
-        const std::filesystem::directory_entry& entry = *iterator;
-        if (entry.is_regular_file(errorCode)
-            && toLowerAscii(entry.path().filename().string()) == targetFileName) {
-            resolvedPath = entry.path().generic_string();
-            return true;
-        }
-        iterator.increment(errorCode);
-    }
-
-    return false;
-}
-
-std::string normalizedLowerPath(std::string path) {
-    std::replace(path.begin(), path.end(), '\\', '/');
-    return toLowerAscii(std::move(path));
-}
-
-std::string runtimeMixExportsRootFromPath(const std::string& pathString) {
-    if (pathString.empty()) {
-        return "";
-    }
-
-    std::filesystem::path path(pathString);
-    std::error_code errorCode;
-    if (std::filesystem::is_regular_file(path, errorCode)) {
-        path = path.parent_path();
-    }
-
-    for (std::filesystem::path current = path;
-        !current.empty();
-        current = current.parent_path()) {
-        if (toLowerAscii(current.filename().string()) == "mix_exports") {
-            return current.generic_string();
-        }
-        if (current == current.parent_path()) {
-            break;
-        }
-    }
-    return "";
-}
-
-std::string runtimeMixExportsRootForContext(
-    const RuntimeMapRenderContext& context
-) {
-    std::string root = runtimeMixExportsRootFromPath(context.tileRootPath);
-    if (!root.empty()) {
-        return root;
-    }
-    root = runtimeMixExportsRootFromPath(context.structureRootPath);
-    if (!root.empty()) {
-        return root;
-    }
-    return runtimeMixExportsRootFromPath(context.assetRootPath);
-}
-
-const std::string& cachedRuntimeMixExportsRootForContext(
-    const RuntimeMapRenderContext& context,
-    RuntimeMapRenderCache& cache
-) {
-    if (!cache.mixExportsRootResolved
-        || cache.mixExportsRootAssetPath != context.assetRootPath
-        || cache.mixExportsRootStructurePath != context.structureRootPath
-        || cache.mixExportsRootTilePath != context.tileRootPath) {
-        cache.resolvedMixExportsRoot = runtimeMixExportsRootForContext(context);
-        cache.mixExportsRootAssetPath = context.assetRootPath;
-        cache.mixExportsRootStructurePath = context.structureRootPath;
-        cache.mixExportsRootTilePath = context.tileRootPath;
-        cache.mixExportsRootResolved = true;
-    }
-    return cache.resolvedMixExportsRoot;
-}
-
-int runtimeMixSearchPriority(const std::string& path) {
-    const std::string lower = normalizedLowerPath(path);
-    const std::string fileName =
-        toLowerAscii(std::filesystem::path(lower).filename().string());
-    if (fileName == "expandmd02.mix") {
-        return -30;
-    }
-    if (fileName == "expandmd01.mix") {
-        return -20;
-    }
-    if (fileName == "ra2md.mix") {
-        return -10;
-    }
-    if (lower.find("/ra2md/localmd.mix") != std::string::npos) {
-        return 0;
-    }
-    if (lower.find("/ra2md/conqmd.mix") != std::string::npos) {
-        return 10;
-    }
-    if (lower.find("/ra2md/") != std::string::npos) {
-        return 20;
-    }
-    if (lower.find("/ra2/local.mix") != std::string::npos) {
-        return 30;
-    }
-    if (lower.find("/ra2/conquer.mix") != std::string::npos) {
-        return 40;
-    }
-    if (fileName == "expand01.mix") {
-        return 45;
-    }
-    if (fileName == "ra2.mix") {
-        return 46;
-    }
-    if (lower.find("/ra2/") != std::string::npos) {
-        return 50;
-    }
-    return 100;
-}
-
-bool isRuntimeSidebarResourceFileName(const std::string& fileName) {
-    const std::string lowerFile = toLowerAscii(fileName);
-    return lowerFile == "credits.shp"
-        || lowerFile == "top.shp"
-        || lowerFile == "side1.shp"
-        || lowerFile == "side2.shp"
-        || lowerFile == "side2b.shp"
-        || lowerFile == "side3.shp"
-        || lowerFile == "addon.shp"
-        || lowerFile == "tabs.shp"
-        || lowerFile == "tab00.shp"
-        || lowerFile == "tab01.shp"
-        || lowerFile == "tab02.shp"
-        || lowerFile == "tab03.shp"
-        || lowerFile == "diplobtn.shp"
-        || lowerFile == "optbtn.shp"
-        || lowerFile == "repair.shp"
-        || lowerFile == "sell.shp"
-        || lowerFile == "r-dn.shp"
-        || lowerFile == "r-up.shp"
-        || lowerFile == "gclock2.shp"
-        || lowerFile == "power.shp"
-        || lowerFile == "powerp.shp"
-        || lowerFile == "radar.shp"
-        || lowerFile == "pips.shp"
-        || lowerFile == "sidebar.pal";
-}
-
-int runtimeMixSearchPriorityForFile(
-    const std::string& path,
-    const std::string& fileName
-) {
-    const std::string lowerPath = normalizedLowerPath(path);
-    const std::string lowerFile = toLowerAscii(fileName);
-    const std::string mixName =
-        toLowerAscii(std::filesystem::path(lowerPath).filename().string());
-
-    const bool loadingScreenResource =
-        (lowerFile.rfind("ls800", 0) == 0
-            && std::filesystem::path(lowerFile).extension().string() == ".shp")
-        || lowerFile == "mplsu.pal"
-        || lowerFile == "mplsuk.pal"
-        || lowerFile == "mplsg.pal"
-        || lowerFile == "mplsf.pal"
-        || lowerFile == "mplsk.pal"
-        || lowerFile == "mplsr.pal"
-        || lowerFile == "mplsc.pal"
-        || lowerFile == "mplsl.pal"
-        || lowerFile == "mplsi.pal"
-        || lowerFile == "mpyls.pal"
-        || lowerFile == "mplsobs.pal";
-    if (loadingScreenResource) {
-        if (mixName == "loadmd.mix") {
-            return -70;
-        }
-        if (mixName == "load.mix") {
-            return -65;
-        }
-    }
-
-    const bool sidebarResource =
-        isRuntimeSidebarResourceFileName(lowerFile);
-    if (sidebarResource) {
-        if (mixName == "sidec02md.mix") {
-            return -60;
-        }
-        if (mixName == "sidec01.mix" || mixName == "sidec02.mix") {
-            return -55;
-        }
-        if (mixName == "conqmd.mix" || mixName == "conquer.mix") {
-            return -20;
-        }
-    }
-
-    const std::string extension =
-        toLowerAscii(std::filesystem::path(lowerFile).extension().string());
-    if (extension == ".shp" || extension == ".sha"
-        || extension == ".vxl" || extension == ".hva") {
-        if (mixName == "conqmd.mix") {
-            return -50;
-        }
-        if (mixName == "conquer.mix") {
-            return -45;
-        }
-        if (mixName == "cachemd.mix" || mixName == "cache.mix") {
-            return -40;
-        }
-        if (mixName.rfind("iso", 0) == 0) {
-            return -30;
-        }
-    }
-
-    return runtimeMixSearchPriority(path);
-}
-
-bool isRuntimeObjectResourceMixCandidate(const std::string& path) {
-    const std::string fileName =
-        toLowerAscii(std::filesystem::path(path).filename().string());
-    if (fileName.rfind("iso", 0) == 0
-        && std::filesystem::path(fileName).extension().string() == ".mix") {
-        return true;
-    }
-    static constexpr const char* ObjectMixNames[] = {
-        "cachemd.mix",
-        "conqmd.mix",
-        "des.mix",
-        "desert.mix",
-        "expandmd02.mix",
-        "expandmd01.mix",
-        "genermd.mix",
-        "localmd.mix",
-        "loadmd.mix",
-        "lun.mix",
-        "lunar.mix",
-        "ntrlmd.mix",
-        "ra2md.mix",
-        "snowmd.mix",
-        "ubn.mix",
-        "urbann.mix",
-        "cameo.mix",
-        "cameomd.mix",
-        "sidec02md.mix",
-        "cache.mix",
-        "conquer.mix",
-        "expand01.mix",
-        "generic.mix",
-        "local.mix",
-        "load.mix",
-        "neutral.mix",
-        "ra2.mix",
-        "sidec01.mix",
-        "sidec02.mix",
-        "sidenc01.mix",
-        "sidenc02.mix",
-        "sno.mix",
-        "snow.mix",
-        "tem.mix",
-        "temperat.mix",
-        "urb.mix",
-        "urban.mix"
-    };
-
-    for (const char* candidate : ObjectMixNames) {
-        if (fileName == candidate) {
-            return true;
-        }
-    }
-    return false;
-}
-
-int runtimeLooseResourceSearchPriority(const std::string& path) {
-    const std::string lower = normalizedLowerPath(path);
-    if (lower.find("/extracted_buildings/") != std::string::npos) {
-        return 0;
-    }
-    if (lower.find("/ra2md/localmd/") != std::string::npos) {
-        return 10;
-    }
-    if (lower.find("/ra2md/") != std::string::npos) {
-        return 20;
-    }
-    if (lower.find("/ra2/") != std::string::npos) {
-        return 30;
-    }
-    return 100;
-}
-
-bool isRuntimeObjectLooseExtension(const std::filesystem::path& path) {
-    const std::string extension = toLowerAscii(path.extension().string());
-    return extension == ".shp"
-        || extension == ".vxl"
-        || extension == ".hva"
-        || extension == ".tem"
-        || extension == ".urb"
-        || extension == ".ubn"
-        || extension == ".des"
-        || extension == ".sno"
-        || extension == ".lun";
-}
-
-void appendRuntimeLooseResourcePathsFromRoot(
-    const std::filesystem::path& root,
-    std::vector<std::string>& paths
-) {
-    std::error_code errorCode;
-    if (std::filesystem::is_regular_file(root, errorCode)) {
-        if (isRuntimeObjectLooseExtension(root)) {
-            paths.push_back(root.generic_string());
-        }
-        return;
-    }
-
-    if (!std::filesystem::is_directory(root, errorCode)) {
-        return;
-    }
-
-    std::filesystem::recursive_directory_iterator iterator(
-        root,
-        std::filesystem::directory_options::skip_permission_denied,
-        errorCode
-    );
-    const std::filesystem::recursive_directory_iterator end;
-    while (!errorCode && iterator != end) {
-        const std::filesystem::directory_entry& entry = *iterator;
-        if (entry.is_regular_file(errorCode)
-            && isRuntimeObjectLooseExtension(entry.path())) {
-            paths.push_back(entry.path().generic_string());
-        }
-        iterator.increment(errorCode);
-    }
-}
-
-std::vector<std::filesystem::path> runtimeLooseObjectSearchRoots(
-    const std::filesystem::path& assetRoot
-) {
-    return {
-        assetRoot,
-        assetRoot / "ra2md" / "localmd",
-        assetRoot / "expandmd02",
-        assetRoot / "expandmd01",
-        assetRoot / "cameomd",
-        assetRoot / "langmd",
-        assetRoot / "language",
-        assetRoot / "extracted_overlays"
-    };
-}
-
-void ensureRuntimeLooseResourceIndex(
-    const std::string& assetRootPath,
-    RuntimeMapRenderCache& cache
-) {
-    if (cache.looseResourceIndexRootPath != assetRootPath) {
-        cache.looseResourceIndexRootPath = assetRootPath;
-        cache.looseResourceIndexBuilt = false;
-        cache.looseResourcePathsByName.clear();
-    }
-
-    if (cache.looseResourceIndexBuilt || assetRootPath.empty()) {
-        return;
-    }
-
-    cache.looseResourceIndexBuilt = true;
-    const std::filesystem::path root(assetRootPath);
-    std::error_code errorCode;
-    if (!std::filesystem::is_directory(root, errorCode)) {
-        return;
-    }
-
-    std::vector<std::string> paths;
-    for (const std::filesystem::path& searchRoot :
-        runtimeLooseObjectSearchRoots(root)) {
-        appendRuntimeLooseResourcePathsFromRoot(searchRoot, paths);
-    }
-
-    // A custom asset root may not use the extracted RA2/YR folder layout.
-    if (paths.empty()) {
-        appendRuntimeLooseResourcePathsFromRoot(root, paths);
-    }
-
-    std::sort(
-        paths.begin(),
-        paths.end(),
-        [](const std::string& left, const std::string& right) {
-            const int leftPriority = runtimeLooseResourceSearchPriority(left);
-            const int rightPriority = runtimeLooseResourceSearchPriority(right);
-            if (leftPriority != rightPriority) {
-                return leftPriority < rightPriority;
-            }
-            return normalizedLowerPath(left) < normalizedLowerPath(right);
-        }
-    );
-
-    for (const std::string& path : paths) {
-        const std::string key =
-            toLowerAscii(std::filesystem::path(path).filename().string());
-        cache.looseResourcePathsByName.try_emplace(key, path);
-    }
-}
-
-bool findRuntimeLooseResourceByName(
-    const std::string& rootPath,
-    const std::string& assetRootPath,
-    const std::string& fileName,
-    RuntimeMapRenderCache& cache,
-    std::string& resolvedPath
-) {
-    if (rootPath.empty() || fileName.empty()) {
-        return false;
-    }
-
-    if (normalizedLowerPath(rootPath) == normalizedLowerPath(assetRootPath)) {
-        ensureRuntimeLooseResourceIndex(assetRootPath, cache);
-        const auto it =
-            cache.looseResourcePathsByName.find(toLowerAscii(fileName));
-        if (it == cache.looseResourcePathsByName.end()) {
-            return false;
-        }
-
-        resolvedPath = it->second;
-        return true;
-    }
-
-    return findFileByNameCaseInsensitive(rootPath, fileName, resolvedPath);
-}
-
-void ensureRuntimeMixArchivePaths(
-    const std::string& assetRootPath,
-    RuntimeMapRenderCache& cache
-) {
-    if (cache.mixArchiveRootPath != assetRootPath) {
-        cache.mixArchiveRootPath = assetRootPath;
-        cache.mixArchivePathsScanned = false;
-        cache.mixArchivePaths.clear();
-        cache.mixArchivesByPath.clear();
-    }
-
-    if (cache.mixArchivePathsScanned || assetRootPath.empty()) {
-        return;
-    }
-
-    cache.mixArchivePathsScanned = true;
-    const std::filesystem::path root(assetRootPath);
-    std::error_code errorCode;
-    if (!std::filesystem::is_directory(root, errorCode)) {
-        return;
-    }
-
-    const auto addKnownMix = [&cache](const std::filesystem::path& path) {
-        std::error_code existsError;
-        if (!std::filesystem::is_regular_file(path, existsError)) {
-            return;
-        }
-        const std::string pathString = path.generic_string();
-        if (!isRuntimeObjectResourceMixCandidate(pathString)) {
-            return;
-        }
-        if (std::find(
-                cache.mixArchivePaths.begin(),
-                cache.mixArchivePaths.end(),
-                pathString
-            ) == cache.mixArchivePaths.end()) {
-            cache.mixArchivePaths.push_back(pathString);
-        }
-    };
-
-    const std::filesystem::path ra2 = root / "ra2";
-    const std::filesystem::path ra2md = root / "ra2md";
-    const char* knownRa2mdMixes[] = {
-        "conqmd.mix",
-        "cachemd.mix",
-        "localmd.mix",
-        "loadmd.mix",
-        "sidec02md.mix",
-        "cameomd.mix",
-        // Retail Yuri's Revenge calls this genermd.mix. Omitting it silently
-        // falls back to RA2's generic.mix (including its unused fortress wall).
-        "genermd.mix",
-        "des.mix",
-        "desert.mix",
-        "lun.mix",
-        "lunar.mix",
-        "snowmd.mix",
-        "ubn.mix",
-        "urbann.mix",
-        "isodes.mix",
-        "isodesmd.mix",
-        "isogenmd.mix",
-        "isolun.mix",
-        "isolunmd.mix",
-        "isosnomd.mix",
-        "isotemmd.mix",
-        "isoubn.mix",
-        "isoubnmd.mix",
-        "isourbmd.mix"
-    };
-    const char* knownRa2Mixes[] = {
-        "conquer.mix",
-        "cache.mix",
-        "local.mix",
-        "load.mix",
-        "sidec01.mix",
-        "sidec02.mix",
-        "sidenc01.mix",
-        "sidenc02.mix",
-        "cameo.mix",
-        "generic.mix",
-        "neutral.mix",
-        "sno.mix",
-        "snow.mix",
-        "tem.mix",
-        "temperat.mix",
-        "urb.mix",
-        "urban.mix",
-        "isogen.mix",
-        "isosnow.mix",
-        "isotemp.mix",
-        "isourb.mix"
-    };
-    for (const char* mixName : knownRa2mdMixes) {
-        addKnownMix(ra2md / mixName);
-    }
-    for (const char* mixName : knownRa2Mixes) {
-        addKnownMix(ra2 / mixName);
-    }
-    addKnownMix(root / "langmd" / "cameomd.mix");
-    addKnownMix(root / "language" / "cameo.mix");
-    addKnownMix(root / "expandmd02.mix");
-    addKnownMix(root / "expandmd01.mix");
-    addKnownMix(root / "ra2md.mix");
-    addKnownMix(root / "expand01.mix");
-    addKnownMix(root / "ra2.mix");
-
-    if (!cache.mixArchivePaths.empty()) {
-        std::sort(
-            cache.mixArchivePaths.begin(),
-            cache.mixArchivePaths.end(),
-            [](const std::string& left, const std::string& right) {
-                const int leftPriority = runtimeMixSearchPriority(left);
-                const int rightPriority = runtimeMixSearchPriority(right);
-                if (leftPriority != rightPriority) {
-                    return leftPriority < rightPriority;
-                }
-                return normalizedLowerPath(left) < normalizedLowerPath(right);
-            }
-        );
-        return;
-    }
-
-    std::filesystem::recursive_directory_iterator iterator(
-        root,
-        std::filesystem::directory_options::skip_permission_denied,
-        errorCode
-    );
-    const std::filesystem::recursive_directory_iterator end;
-    while (!errorCode && iterator != end) {
-        const std::filesystem::directory_entry& entry = *iterator;
-        if (entry.is_regular_file(errorCode)
-            && toLowerAscii(entry.path().extension().string()) == ".mix") {
-            const std::string path = entry.path().generic_string();
-            if (isRuntimeObjectResourceMixCandidate(path)) {
-                cache.mixArchivePaths.push_back(path);
-            }
-        }
-        iterator.increment(errorCode);
-    }
-
-    std::sort(
-        cache.mixArchivePaths.begin(),
-        cache.mixArchivePaths.end(),
-        [](const std::string& left, const std::string& right) {
-            const int leftPriority = runtimeMixSearchPriority(left);
-            const int rightPriority = runtimeMixSearchPriority(right);
-            if (leftPriority != rightPriority) {
-                return leftPriority < rightPriority;
-            }
-            return normalizedLowerPath(left) < normalizedLowerPath(right);
-        }
-    );
-}
-
-RuntimeMixArchiveCacheEntry* loadRuntimeMixArchiveFromCache(
-    const std::string& mixPath,
-    RuntimeMapRenderCache& cache
-) {
-    auto [it, inserted] = cache.mixArchivesByPath.try_emplace(mixPath);
-    RuntimeMixArchiveCacheEntry& entry = it->second;
-    if (!entry.loadAttempted) {
-        entry.loadAttempted = true;
-        entry.loaded = entry.archive.loadFromFile(mixPath)
-            && entry.archive.isIndexReadable();
-        entry.errorMessage = entry.archive.getErrorMessage();
-        if (!entry.loaded && entry.errorMessage.empty()) {
-            entry.errorMessage = "MIX archive index is not readable: " + mixPath;
-        }
-    }
-
-    return entry.loaded ? &entry : nullptr;
-}
-
-bool loadRuntimeResourceBytesFromMixArchives(
-    const std::string& assetRootPath,
-    const std::string& fileName,
-    RuntimeMapRenderCache& cache,
-    std::vector<unsigned char>& bytes,
-    std::string& sourceName,
-    std::string& errorMessage
-) {
-    ensureRuntimeMixArchivePaths(assetRootPath, cache);
-
-    std::vector<std::string> searchPaths = cache.mixArchivePaths;
-    std::stable_sort(
-        searchPaths.begin(),
-        searchPaths.end(),
-        [&fileName](const std::string& left, const std::string& right) {
-            const int leftPriority =
-                runtimeMixSearchPriorityForFile(left, fileName);
-            const int rightPriority =
-                runtimeMixSearchPriorityForFile(right, fileName);
-            if (leftPriority != rightPriority) {
-                return leftPriority < rightPriority;
-            }
-            return normalizedLowerPath(left) < normalizedLowerPath(right);
-        }
-    );
-
-    for (const std::string& mixPath : searchPaths) {
-        RuntimeMixArchiveCacheEntry* archiveEntry =
-            loadRuntimeMixArchiveFromCache(mixPath, cache);
-        if (archiveEntry == nullptr) {
-            continue;
-        }
-
-        const MixEntry* mixEntry = archiveEntry->archive.findEntryByName(fileName);
-        if (mixEntry == nullptr) {
-            continue;
-        }
-
-        std::vector<std::uint8_t> entryBytes;
-        if (!archiveEntry->archive.readEntryData(
-                *mixEntry,
-                entryBytes,
-                errorMessage
-            )) {
-            return false;
-        }
-
-        bytes.assign(entryBytes.begin(), entryBytes.end());
-        sourceName = mixPath + "!" + fileName;
-        return true;
-    }
-
-    errorMessage = "resource was not found in loose files or MIX archives: "
-        + fileName;
-    return false;
-}
-
-bool runtimePathUsesDefaultAssetRoot(
-    const std::string& resourcePath,
-    const std::string& assetRootPath
-);
-
-bool runtimeAssetRootHasMixArchives(
-    const std::string& assetRootPath,
-    RuntimeMapRenderCache& cache
-) {
-    ensureRuntimeMixArchivePaths(assetRootPath, cache);
-    return !cache.mixArchivePaths.empty();
-}
-
-bool loadRuntimeResourceBytesByName(
-    const std::vector<std::string>& looseRootPaths,
-    const std::string& assetRootPath,
-    const std::string& fileName,
-    RuntimeMapRenderCache& cache,
-    std::vector<unsigned char>& bytes,
-    std::string& sourceName,
-    std::string& errorMessage
-) {
-    bytes.clear();
-    sourceName.clear();
-    errorMessage.clear();
-
-    const auto tryLooseRoot = [&](const std::string& rootPath)
-        -> std::optional<bool> {
-        std::string resolvedPath;
-        if (!findRuntimeLooseResourceByName(
-                rootPath, assetRootPath, fileName, cache, resolvedPath)) {
-            return std::nullopt;
-        }
-        if (!loadBytes(resolvedPath, bytes, errorMessage)) {
-            return false;
-        }
-        sourceName = resolvedPath;
-        errorMessage.clear();
-        return true;
-    };
-
-    // Explicit roots outside the default exports retain caller overrides.
-    for (const std::string& rootPath : looseRootPaths) {
-        if (!runtimePathUsesDefaultAssetRoot(rootPath, assetRootPath)) {
-            if (const auto loaded = tryLooseRoot(rootPath); loaded.has_value()) {
-                return *loaded;
-            }
-        }
-    }
-
-    // Stock archives are authoritative over default exported loose copies.
-    if (loadRuntimeResourceBytesFromMixArchives(
-            assetRootPath,
-            fileName,
-            cache,
-            bytes,
-            sourceName,
-            errorMessage
-        )) {
-        return true;
-    }
-    bytes.clear();
-    sourceName.clear();
-    if (runtimeAssetRootHasMixArchives(assetRootPath, cache)) {
-        return false;
-    }
-
-    // A root without archives is a standalone loose/custom installation.
-    for (const std::string& rootPath : looseRootPaths) {
-        if (runtimePathUsesDefaultAssetRoot(rootPath, assetRootPath)) {
-            if (const auto loaded = tryLooseRoot(rootPath); loaded.has_value()) {
-                return *loaded;
-            }
-        }
-    }
-
-    return false;
-}
-
-bool equalAsciiNoCase(const std::string& left, const std::string& right) {
-    return toLowerAscii(left) == toLowerAscii(right);
-}
-
-void addUniqueCandidate(std::vector<std::string>& candidates, const std::string& candidate) {
-    if (!candidate.empty()
-        && std::find(candidates.begin(), candidates.end(), candidate)
-            == candidates.end()) {
-        candidates.push_back(candidate);
-    }
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #include "render/geometry/RuntimeGeometryQueryDeclarations.inl"
 
-char newTheaterCharForExtension(const std::string& tileExtension) {
-    const std::string extension = toLowerAscii(tileExtension);
-    if (extension == ".tem") {
-        return 't';
-    }
-    if (extension == ".urb") {
-        return 'u';
-    }
-    if (extension == ".ubn") {
-        return 'n';
-    }
-    if (extension == ".des") {
-        return 'd';
-    }
-    if (extension == ".lun") {
-        return 'l';
-    }
-    if (extension == ".sno") {
-        return 'a';
-    }
-    return '\0';
-}
 
-bool artIdSupportsNewTheater(const std::string& artId) {
-    if (artId.size() < 2) {
-        return false;
-    }
 
-    const char first =
-        static_cast<char>(std::toupper(static_cast<unsigned char>(artId[0])));
-    const char second =
-        static_cast<char>(std::toupper(static_cast<unsigned char>(artId[1])));
-    return (first == 'G' || first == 'N' || first == 'C' || first == 'Y')
-        && (second == 'A'
-            || second == 'T'
-            || second == 'U'
-            || second == 'D'
-            || second == 'L'
-            || second == 'N');
-}
+
 
 const UnitType* findObjectUnitTypeForRender(
     const RuntimeMapRenderContext& context,
@@ -3168,81 +1390,7 @@ std::vector<std::string> resolveObjectVoxelImageIdCandidates(
     return candidates;
 }
 
-std::vector<std::string> resolveAuxiliarySpriteImageIdCandidates(
-    const std::string& imageId,
-    const RuntimeMapRenderContext& context,
-    const ArtType* fallbackArtType = nullptr
-) {
-    std::vector<std::string> candidates;
-    if (imageId.empty()) {
-        return candidates;
-    }
 
-    const ArtType* artType = context.art == nullptr
-        ? nullptr
-        : context.art->findArtType(imageId);
-    const std::string baseName =
-        artType == nullptr || artType->image.empty()
-            ? imageId
-            : artType->image;
-    if (baseName.empty()) {
-        return candidates;
-    }
-
-    const std::filesystem::path basePath(baseName);
-    if (!basePath.extension().empty()) {
-        addUniqueCandidate(candidates, basePath.filename().string());
-        return candidates;
-    }
-
-    const std::string lowerBaseName = toLowerAscii(baseName);
-    if (artType != nullptr
-        && artType->theater
-        && context.theater != nullptr) {
-        const std::string theaterExtension =
-            context.theater->getTileExtension();
-        if (!theaterExtension.empty()) {
-            addUniqueCandidate(
-                candidates,
-                lowerBaseName + theaterExtension
-            );
-            addUniqueCandidate(candidates, baseName + theaterExtension);
-        }
-    }
-    // Stock grinder B/D layers omit NewTheater, but their normal and snow
-    // canvases are separate G/A resources just like their building body.
-    const bool grinderLayer=lowerBaseName.rfind("yagrnd_",0)==0;
-    // Buildup filenames belong to the building's NewTheater policy even
-    // when the MK image has no separate ART entry. Other auxiliary layers
-    // keep their own policy; a palette fallback alone does not opt them in.
-    const bool buildupNewTheater = fallbackArtType != nullptr
-        && fallbackArtType->newTheater
-        && equalAsciiNoCase(trimAsciiForRender(imageId),
-            trimAsciiForRender(fallbackArtType->buildup));
-    if (((artType != nullptr && (artType->newTheater || grinderLayer))
-            || buildupNewTheater)
-        && context.theater != nullptr
-        && artIdSupportsNewTheater(baseName)
-        && lowerBaseName.size() >= 2) {
-        const char newTheaterChar =
-            newTheaterCharForExtension(context.theater->getTileExtension());
-        if (newTheaterChar != '\0') {
-            std::string newTheaterName = lowerBaseName;
-            newTheaterName[1] = newTheaterChar;
-            addUniqueCandidate(candidates, newTheaterName);
-
-            std::string genericName = lowerBaseName;
-            genericName[1] = 'g';
-            addUniqueCandidate(candidates, genericName);
-        }
-    }
-
-    addUniqueCandidate(candidates, baseName);
-    if (!equalAsciiNoCase(baseName, imageId)) {
-        addUniqueCandidate(candidates, imageId);
-    }
-    return candidates;
-}
 
 bool objectUsesVoxelArt(
     const WorldObjectInstance& object,
@@ -3359,39 +1507,7 @@ bool runtimeObjectLooksAircraftForRender(
     if (const auto* metadata = runtimeGeometryMetadataForObject(object, context)) {
         return metadata->aircraft;
     }
-    if (context.rules == nullptr
-        || (object.kind != WorldObjectKind::Unit
-            && object.kind != WorldObjectKind::Infantry)) {
-        return false;
-    }
-
-    const UnitType* aircraftType =
-        context.rules->findUnitType("aircraft", object.type);
-    if (aircraftType != nullptr) {
-        return true;
-    }
-
-    const UnitType* flyingType = object.kind == WorldObjectKind::Infantry
-        ? context.rules->findUnitType("infantry", object.type)
-        : context.rules->findUnitType("vehicle", object.type);
-    if (flyingType == nullptr) {
-        return false;
-    }
-
-    const std::string speedType = toLowerAscii(flyingType->speedType);
-    const std::string movementZone = toLowerAscii(flyingType->movementZone);
-    const std::string category = toLowerAscii(flyingType->category);
-    const std::string locomotor = toLowerAscii(flyingType->locomotor);
-    return flyingType->jumpJet
-        || flyingType->consideredAircraft
-        || containsText(speedType, "air")
-        || containsText(speedType, "fly")
-        || containsText(speedType, "winged")
-        || containsText(movementZone, "air")
-        || containsText(movementZone, "fly")
-        || containsText(category, "air")
-        || containsText(locomotor, "air")
-        || containsText(locomotor, "fly");
+    return runtimeObjectAircraftRuleClassification(object, context.rules);
 }
 
 constexpr int runtimeVoxelFacingBucketCount = 32;
@@ -3515,63 +1631,14 @@ int selectRuntimeInfantryIdleFrame(
     return idleFrame >= 0 && idleFrame < frameCount ? idleFrame : -1;
 }
 
-int animationFrameStep(
-    const RuntimeMapRenderContext& context,
-    const ArtType* artType
-) {
-    return std::max(
-        1,
-        context.animationTick / runtimeAnimationFrameDelayTicks(artType, context.fixedTickHz)
-    );
-}
-
 int selectRuntimeAuxiliaryAnimationFrame(
     const RuntimeMapRenderContext& context,
     const ArtType* artType,
     int frameCount,
     bool mainFramesOnlyFallback
 ) {
-    if (frameCount <= 1) {
-        return 0;
-    }
-
-    int start = 0;
-    if (artType != nullptr) {
-        if (artType->hasAnimationLoopStart) {
-            start = artType->animationLoopStart;
-        } else if (artType->hasAnimationStart) {
-            start = artType->animationStart;
-        }
-    }
-    start = std::clamp(start, 0, std::max(0, frameCount - 1));
-
-    int endExclusive = mainFramesOnlyFallback
-        ? runtimeVisibleMainFrameCount(frameCount, true)
-        : frameCount;
-    if (artType != nullptr && artType->hasAnimationLoopEnd) {
-        endExclusive = artType->animationLoopEnd;
-        if (endExclusive <= start) {
-            endExclusive = start + 1;
-        }
-    } else if (artType != nullptr && artType->hasAnimationEnd) {
-        const int base =
-            artType->hasAnimationStart ? artType->animationStart : start;
-        endExclusive = base + std::max(1, artType->animationEnd);
-    }
-    endExclusive = std::clamp(endExclusive, start + 1, frameCount);
-
-    const int span = std::max(1, endExclusive - start);
-    const int step = animationFrameStep(context, artType);
-    if (artType != nullptr && artType->pingPong && span > 1) {
-        const int cycle = (span * 2) - 2;
-        int position = step % cycle;
-        if (position >= span) {
-            position = cycle - position;
-        }
-        return start + position;
-    }
-
-    return start + (step % span);
+    return runtimeAuxiliaryAnimationFrame(artType, frameCount, mainFramesOnlyFallback,
+        context.animationTick, context.fixedTickHz);
 }
 
 struct RuntimeObjectSequenceFrameResult {
@@ -7049,6 +5116,20 @@ unsigned char shadeVxlPaletteIndexWithLookup(
 #include "render/voxel/RuntimeVoxelFacePreparation.inl"
 #include "render/voxel/RuntimeVoxelCornerProjection.inl"
 
+// This bridge is scoped to synchronous owner-side preparation. These pointers
+// never enter a Task or a worker. At most the turret and barrel are captured.
+struct RuntimeGrandCannonRasterCapture {
+    struct Part {
+        concord::tasks::Task task;
+        RuntimeShpFrameImage* image = nullptr;
+        std::vector<unsigned char>* shadow = nullptr;
+    };
+    std::array<Part, 2> parts;
+    std::size_t count = 0;
+    std::uint64_t generation = 1;
+};
+thread_local RuntimeGrandCannonRasterCapture* runtimeGrandCannonCapture = nullptr;
+
 bool decodeRuntimeVxlSpriteFromBytes(
     const std::vector<unsigned char>& bytes,
     const std::vector<RuntimeHvaTransform>& transforms,
@@ -7173,9 +5254,9 @@ bool decodeRuntimeVxlSpriteFromBytes(
         runtimeVxlFaithfulLightingSettings();
 
     std::vector<RuntimeRasterFace> projectedFaces;
-    projectedFaces.reserve(std::min<std::size_t>(bytes.size() / 4, 32000));
+    projectedFaces.reserve(runtimeGrandCannonCapture ? concord::grand_cannon::MaxFaces : std::min<std::size_t>(bytes.size() / 4, 32000));
     std::vector<RuntimeRasterVoxel> projectedVoxels;
-    projectedVoxels.reserve(std::min<std::size_t>(bytes.size() / 2, 48000));
+    projectedVoxels.reserve(runtimeGrandCannonCapture ? concord::grand_cannon::MaxVoxels : std::min<std::size_t>(bytes.size() / 2, 48000));
     std::vector<std::array<double, 5>> projectedAnchors;
     double sceneDepthMinimumY = std::numeric_limits<double>::infinity();
     double sceneDepthMaximumY = -std::numeric_limits<double>::infinity();
@@ -7492,7 +5573,7 @@ bool decodeRuntimeVxlSpriteFromBytes(
         std::optional<RuntimePerfTraceScope> sourceColumnsTrace(
             std::in_place, "vxl.decodeSourceColumns", -1);
         std::vector<RuntimeDecodedVoxel> decodedVoxels;
-        decodedVoxels.reserve(std::min<std::size_t>(baseSize * 2U, 16000U));
+        decodedVoxels.reserve(runtimeGrandCannonCapture ? concord::grand_cannon::MaxVoxels : std::min<std::size_t>(baseSize * 2U, 16000U));
         std::size_t occupancySize = 0;
         if (!checkedMul(
                 static_cast<std::size_t>(sizeX),
@@ -7507,6 +5588,8 @@ bool decodeRuntimeVxlSpriteFromBytes(
             errorMessage = "VXL occupancy grid overflowed: " + sourceName;
             return false;
         }
+        if (runtimeGrandCannonCapture && occupancySize > 1024U * 1024U)
+            throw std::length_error("Grand Cannon owner occupancy exceeded 1M cells");
         std::vector<unsigned char> occupiedVoxels(occupancySize, 0);
         const auto voxelIndex = [sizeX, sizeY](int vx, int vy, int vz) -> std::size_t {
             return (static_cast<std::size_t>(vz)
@@ -7596,6 +5679,8 @@ bool decodeRuntimeVxlSpriteFromBytes(
                         if (color == 0) {
                             ++zeroColorVoxelCount;
                         }
+                        if (runtimeGrandCannonCapture && decodedVoxels.size() >= concord::grand_cannon::MaxVoxels)
+                            throw std::length_error("Grand Cannon owner preparation exceeded its sample bound");
                         decodedVoxels.push_back({x, y, z, color, normal});
                         occupiedVoxels[voxelIndex(x, y, z)] = 1;
                     }
@@ -8007,6 +6092,8 @@ bool decodeRuntimeVxlSpriteFromBytes(
                     voxel.normal,
                     voxel.color
                 );
+                if (runtimeGrandCannonCapture && projectedFaces.size() >= concord::grand_cannon::MaxFaces)
+                    throw std::length_error("Grand Cannon owner preparation exceeded its sample bound");
                 projectedFaces.push_back(face);
             };
         const auto addProjectedVoxel =
@@ -8151,6 +6238,8 @@ bool decodeRuntimeVxlSpriteFromBytes(
                     voxel.normal,
                     voxel.color
                 );
+                if (runtimeGrandCannonCapture && projectedVoxels.size() >= concord::grand_cannon::MaxVoxels)
+                    throw std::length_error("Grand Cannon owner preparation exceeded its sample bound");
                 projectedVoxels.push_back(rasterVoxel);
             };
 
@@ -8467,6 +6556,113 @@ bool decodeRuntimeVxlSpriteFromBytes(
         }
     );
 
+    // Capture at the original sorted-face/raster boundary. Other renderer
+    // profiles still use the original synchronous decoder on the owner.
+    if (runtimeGrandCannonCapture != nullptr && simpleProfile && !forceFaceDebug && !forcePointDebug) {
+        RuntimeVxlReferenceRaster selected = westwoodProfile
+            ? RuntimeVxlReferenceRaster::Point : runtimeVxlReferenceRaster();
+        if ((renderProfile == RuntimeVxlRenderProfile::FixedScale && selected == RuntimeVxlReferenceRaster::Coverage)
+            || (selected == RuntimeVxlReferenceRaster::Point && !sizing.pointRaster))
+            selected = RuntimeVxlReferenceRaster::Cuboid;
+        if (selected == RuntimeVxlReferenceRaster::Cuboid) {
+            using namespace concord::grand_cannon;
+            static_assert(static_cast<int>(RuntimeVxlSurfaceClass::Top) == 1);
+            static_assert(static_cast<int>(RuntimeVxlSurfaceClass::Side) == 2);
+            static_assert(static_cast<int>(RuntimeVxlSurfaceClass::Under) == 3);
+            static_assert(static_cast<int>(RuntimeVxlSurfaceClass::LowerDark) == 4);
+            auto& capture = *runtimeGrandCannonCapture;
+            if (capture.count == capture.parts.size() || drawFaces.size() > MaxFaces || drawVoxels.size() > MaxVoxels) {
+                errorMessage = "Grand Cannon prepared input exceeds its admission limit";
+                return false;
+            }
+            auto& part = capture.parts[capture.count++];
+            Input header{width, height, padding, shadowSectionIndex,
+                static_cast<std::uint32_t>(drawFaces.size()), static_cast<std::uint32_t>(drawVoxels.size()),
+                runtimeVxlReferenceDepthEpsilon(), runtimeVxlReferenceFaceBias(), minDepth, maxDepth};
+            part.task.generation = capture.generation;
+            part.task.input = concord::tasks::OwnedBytes(sizeof(Input) + drawFaces.size() * sizeof(Face) + drawVoxels.size() * sizeof(Shadow));
+            auto destination = part.task.input.bytes().data();
+            std::memcpy(destination, &header, sizeof(header));
+            destination += sizeof(header);
+            for (const auto& original : drawFaces) {
+                Face face{};
+                face.x = original.preciseX; face.y = original.preciseY; face.depth = original.cornerDepth;
+                face.normalBrightness = original.normalBrightness; face.material = original.material;
+                face.color = original.color; face.normal = original.normalIndex;
+                face.vpl = original.vplSection; face.ownerRemap = original.ownerRemap ? 1 : 0;
+                std::memcpy(destination, &face, sizeof(face)); destination += sizeof(face);
+            }
+            for (const auto& original : drawVoxels) {
+                Shadow shadow{};
+                shadow.x = original.shadowX; shadow.y = original.shadowY;
+                shadow.section = original.sectionIndex; shadow.color = original.color;
+                std::memcpy(destination, &shadow, sizeof(shadow)); destination += sizeof(shadow);
+            }
+            const auto pixelsCount = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+            part.task.outputBytes = outputBytes(pixelsCount);
+            part.task.scratchBytes = pixelsCount * sizeof(double);
+            part.task.kernel = raster;
+            part.image = &image;
+            part.shadow = &shadowPixels;
+            double anchorX = (minX + maxX) * 0.5;
+            double anchorY = maxY;
+            if (sizing.modelOriginPivot) {
+                anchorX = 0.0;
+                anchorY = 0.0;
+            } else if (!projectedAnchors.empty()) {
+                anchorX = 0.0;
+                anchorY = 0.0;
+                for (const std::array<double, 5>& anchor : projectedAnchors) {
+                    anchorX += anchor[0];
+                    anchorY += anchor[1];
+                }
+                anchorX /= static_cast<double>(projectedAnchors.size());
+                anchorY /= static_cast<double>(projectedAnchors.size());
+            }
+            const int anchorPixelX =
+                padding
+                + static_cast<int>(std::llround((anchorX - minX) * fitScale));
+            const int anchorPixelY =
+                padding
+                + static_cast<int>(std::llround((anchorY - minY) * fitScale));
+            image.offsetX = (width / 2) - std::clamp(anchorPixelX, 0, width - 1);
+            image.offsetY = height - std::clamp(anchorPixelY, 0, height - 1);
+            image.globalWidth = width;
+            image.globalHeight = height;
+            image.width = width;
+            image.height = height;
+            if (std::isfinite(sceneDepthMinimumY) && std::isfinite(sceneDepthMaximumY)) {
+                const int sceneHeight = static_cast<int>((sceneDepthMaximumY - sceneDepthMinimumY) * fitScale) + 8;
+                const int sceneCenter = static_cast<int>(((sceneDepthMinimumY + sceneDepthMaximumY) * 0.5 - anchorY) * fitScale);
+                image.sceneDepthBoundsValid = true;
+                image.sceneDepthBoundsTop = std::clamp(anchorPixelY, 0, height - 1) + sceneCenter - sceneHeight / 2;
+                image.sceneDepthBoundsBottom = image.sceneDepthBoundsTop + sceneHeight;
+            }
+            image.paletteRemapStart = paletteRemapStart;
+            image.paletteRemapEnd = paletteRemapEnd;
+            image.paletteRemapRangeFromHeader = paletteRemapRangeFromHeader;
+            image.fallbackOwnerRemapCount = fallbackOwnerRemapCount;
+            image.zeroColorVoxelCount = zeroColorVoxelCount;
+            image.rasterPathStats = {};
+            image.rasterFunctionActuallyCalled = "cuboid";
+            image.vxlAlreadyVplResolved = useVoxelPaletteLookupForSprite;
+            image.lightLevelsApplied =
+                !simpleProfile && !useVoxelPaletteLookupForSprite;
+            image.remapLightApplied =
+                !simpleProfile && !useVoxelPaletteLookupForSprite;
+            image.opaqueBoundsWidth = 0;
+            image.opaqueBoundsHeight = 0;
+            image.topFacePixelCount = 0;
+            image.sideFacePixelCount = 0;
+            image.lowerFacePixelCount = 0;
+            image.pointSampleCount = static_cast<int>(drawVoxels.size());
+            image.faceSampleCount = static_cast<int>(drawFaces.size());
+            image.exposedFaceCount = static_cast<int>(drawFaces.size());
+            image.sourcePath = sourceName;
+            return true;
+        }
+    }
+    
     std::vector<unsigned char> pixels(
         static_cast<std::size_t>(width) * static_cast<std::size_t>(height),
         0
@@ -12014,13 +10210,13 @@ void drawDiamond(
         {center.x - width / 2, center.y}
     };
 
-    SetDCBrushColor(dc, fillColor);
-    SetDCPenColor(dc, strokeColor);
+    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, fillColor);
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, strokeColor);
     Polygon(dc, points, 4);
 }
 
 void drawSmallCross(HDC dc, int x, int y, COLORREF color) {
-    SetDCPenColor(dc, color);
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, color);
     MoveToEx(dc, x - 4, y, nullptr);
     LineTo(dc, x + 5, y);
     MoveToEx(dc, x, y - 4, nullptr);
@@ -12045,17 +10241,17 @@ void drawRuntimeWallOverlayFallback(
         {center.x + halfWidth, center.y - 2},
         {center.x, center.y + halfHeight - 1}
     };
-    SetDCPenColor(dc, dark);
-    SetDCBrushColor(dc, side);
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, dark);
+    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, side);
     Polygon(dc, body, 4);
 
     MoveToEx(dc, center.x - halfWidth + 4, center.y - 3, nullptr);
     LineTo(dc, center.x, center.y - halfHeight);
     LineTo(dc, center.x + halfWidth - 4, center.y - 3);
-    SetDCPenColor(dc, ownerColor);
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, ownerColor);
     MoveToEx(dc, center.x - halfWidth / 2, center.y - 4, nullptr);
     LineTo(dc, center.x + halfWidth / 2, center.y - 4);
-    SetDCPenColor(dc, top);
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, top);
     MoveToEx(dc, center.x - halfWidth + 3, center.y - 1, nullptr);
     LineTo(dc, center.x + halfWidth - 3, center.y - 1);
 }
@@ -13861,6 +12057,8 @@ RuntimePaletteColor runtimePaletteColorWithExtraUnitLight(
     return {apply(color.r), apply(color.g), apply(color.b)};
 }
 
+#include "render/core/RuntimeMapGpuWorld.inl"
+
 bool hasPixelSurface(const RuntimeMapRenderContext& context) {
     return context.surfacePixels != nullptr
         && context.surfaceWidth > 0
@@ -13937,6 +12135,13 @@ int applyRuntimeLightingTintToViewport(
             ? runtimeMakeLightingLookupRaster(lookup.red, lookup.green, lookup.blue)
             : RuntimeLightingLookupRaster{};
     }
+    if(runtimeGpuWorldDc(dc)&&runtimeGpuWorldTarget(context)) {
+        try{std::array<std::uint32_t,256> colors{};for(std::size_t i=0;i<colors.size();++i)colors[i]=static_cast<std::uint32_t>(lookup.blue[i])|(static_cast<std::uint32_t>(lookup.green[i])<<8U)|(static_cast<std::uint32_t>(lookup.red[i])<<16U);
+            auto* list=runtimeGpuWorldOwner->drawList();if(!list)return width*height;auto c=runtimeGpuWorldRegion(viewport,concord::render::MapDrawKind::Lookup);
+            c.palette=list->internValues<std::uint32_t>(colors);(void)runtimeGpuWorldEmit(c);
+        }catch(...){runtimeGpuWorldOwner->reject("world-global-light-budget");}return width*height;
+    }
+
     if (hasPixelSurface(context)) {
         if (!runtimeFrameScalingReferenceForRender() && lookup.raster.exact) {
             if (!lookup.raster.identity) {
@@ -14050,49 +12255,13 @@ int applyRuntimeLightingTintToViewport(
     return copied ? width * height : 0;
 }
 
-double runtimeElapsedMs(
-    const std::chrono::steady_clock::time_point& start,
-    const std::chrono::steady_clock::time_point& end
-) {
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
 
-bool runtimeRenderDetailDiagnosticsEnabled(
-    const RuntimeMapRenderContext& context
-) {
-    if (context.detailStatsEnabled) {
-        return true;
-    }
 
-    static const bool environmentEnabled = []() {
-        const char* rawValue = runtimeRendererEnvironmentValue("CONCORD_RENDER_DETAIL_STATS");
-        if (rawValue == nullptr || rawValue[0] == '\0') {
-            return false;
-        }
 
-        const std::string value = toLowerAscii(rawValue);
-        return value != "0"
-            && value != "false"
-            && value != "no"
-            && value != "off";
-    }();
-    return environmentEnabled;
-}
 
-std::chrono::steady_clock::time_point runtimeMaybeTimingStart(bool enabled) {
-    return enabled
-        ? std::chrono::steady_clock::now()
-        : std::chrono::steady_clock::time_point{};
-}
 
-double runtimeMaybeElapsedMs(
-    bool enabled,
-    const std::chrono::steady_clock::time_point& start
-) {
-    return enabled
-        ? runtimeElapsedMs(start, std::chrono::steady_clock::now())
-        : 0.0;
-}
+
+
 
 bool putSurfacePixel(
     const RuntimeMapRenderContext& context,
@@ -14100,6 +12269,7 @@ bool putSurfacePixel(
     int y,
     std::uint32_t color
 ) {
+    if(runtimeGpuWorldPixel(context,x,y,concord::render::MapDrawKind::Fill,color))return true;
     if (!hasPixelSurface(context)
         || x < 0
         || y < 0
@@ -14122,6 +12292,7 @@ bool shadeSurfacePixel(
     int y,
     int shade
 ) {
+    if(runtimeGpuWorldPixel(context,x,y,concord::render::MapDrawKind::Shade,static_cast<std::uint32_t>(shade)))return true;
     if (!hasPixelSurface(context)
         || x < 0
         || y < 0
@@ -14143,7 +12314,7 @@ bool shadeSurfacePixel(
 }
 
 void fillViewport(HDC dc, const RECT& viewport) {
-    SetDCBrushColor(dc, RGB(15, 22, 31));
+    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, RGB(15, 22, 31));
     FillRect(dc, &viewport, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
 
@@ -14168,32 +12339,7 @@ void invalidateRuntimePackedSpritePalettes(RuntimeMapRenderCache& cache) {
     invalidate(cache.buildingDepthTemplate);
 }
 
-bool runtimePathUsesDefaultAssetRoot(
-    const std::string& resourcePath,
-    const std::string& assetRootPath
-) {
-    if (resourcePath.empty() || assetRootPath.empty()) {
-        return false;
-    }
 
-    const auto normalizedAbsolute = [](const std::string& path) {
-        std::error_code errorCode;
-        const std::filesystem::path absolutePath =
-            std::filesystem::absolute(path, errorCode);
-        return normalizedLowerPath((errorCode
-            ? std::filesystem::path(path)
-            : absolutePath).lexically_normal().generic_string());
-    };
-    std::string root = normalizedAbsolute(assetRootPath);
-    while (!root.empty() && root.back() == '/') {
-        root.pop_back();
-    }
-    const std::string path = normalizedAbsolute(resourcePath);
-    return path == root
-        || (path.size() > root.size()
-            && path.compare(0, root.size(), root) == 0
-            && path[root.size()] == '/');
-}
 
 bool loadRuntimeConfiguredPalette(
     const RuntimeMapRenderContext& context,
@@ -14733,20 +12879,16 @@ const std::vector<RuntimePaletteColor>* runtimeNamedPaletteForRender(
     return &entry.palette;
 }
 
+
+
+
+
 RuntimeTmpTileFile* loadRuntimeTmpTileFromCache(
     const std::string& path,
     RuntimeMapRenderCache& cache
 ) {
-    auto [it, inserted] = cache.tmpTilesByPath.try_emplace(path);
-    RuntimeTmpTileFile& tileFile = it->second;
-    if (!tileFile.loadAttempted) {
-        tileFile.loadAttempted = true;
-        std::string errorMessage;
-        tileFile.loaded = loadRuntimeTmpTileFile(path, tileFile, errorMessage);
-        tileFile.errorMessage = errorMessage;
-    }
-
-    return tileFile.loaded ? &tileFile : nullptr;
+    RuntimeTerrainTmpResourceByteSource source(cache);
+    return ::loadRuntimeTmpTileFromCache(path, cache, source);
 }
 
 RuntimeTmpTileFile* loadRuntimeTmpTileByNameFromCache(
@@ -14755,49 +12897,10 @@ RuntimeTmpTileFile* loadRuntimeTmpTileByNameFromCache(
     const std::string& fileName,
     RuntimeMapRenderCache& cache
 ) {
-    const std::string cacheKey = "resource:"
-        + normalizedLowerPath(assetRootPath)
-        + "|"
-        + toLowerAscii(fileName);
-    auto found = cache.tmpTilesByPath.find(cacheKey);
-    if (found != cache.tmpTilesByPath.end()
-        && found->second.loadAttempted) {
-        cache.lastTmpTileLoadError = found->second.errorMessage;
-        return found->second.loaded ? &found->second : nullptr;
-    }
-
-    std::vector<unsigned char> bytes;
-    std::string sourceName;
-    std::string errorMessage;
-    const bool bytesLoaded = loadRuntimeResourceBytesByName(
-        rootPaths,
-        assetRootPath,
-        fileName,
-        cache,
-        bytes,
-        sourceName,
-        errorMessage
+    RuntimeTerrainTmpResourceByteSource source(cache);
+    return ::loadRuntimeTmpTileByNameFromCache(
+        rootPaths, assetRootPath, fileName, cache, source
     );
-
-    auto [it, inserted] = cache.tmpTilesByPath.try_emplace(cacheKey);
-    RuntimeTmpTileFile& tileFile = it->second;
-    if (!tileFile.loadAttempted) {
-        tileFile.loadAttempted = true;
-        if (bytesLoaded) {
-            tileFile.loaded = loadRuntimeTmpTileBytes(
-                bytes,
-                sourceName.empty() ? fileName : sourceName,
-                tileFile,
-                errorMessage
-            );
-        } else {
-            tileFile.loaded = false;
-        }
-        tileFile.errorMessage = errorMessage;
-    }
-    cache.lastTmpTileLoadError = tileFile.errorMessage;
-
-    return tileFile.loaded ? &tileFile : nullptr;
 }
 
 const RuntimeTmpSubTileImage* findRuntimeSubTileImage(
@@ -15239,243 +13342,9 @@ int runtimeAircraftBuildingClearanceLiftPixels(
 
 #include "render/buildings/RuntimeFactoryAirExitRender.inl"
 
-RuntimeObjectShpSpriteCacheEntry* loadRuntimeAuxiliaryShpSpriteFromCache(
-    const std::string& imageId,
-    int requestedFrameIndex,
-    const RuntimeMapRenderContext& context,
-    RuntimeMapRenderCache& cache,
-    bool mainFramesOnly = false,
-    const ArtType* fallbackArtType = nullptr
-) {
-    if (imageId.empty()) {
-        return nullptr;
-    }
 
-    std::vector<std::string> imageCandidates =
-        resolveAuxiliarySpriteImageIdCandidates(imageId, context, fallbackArtType);
-    if (imageCandidates.empty()) {
-        imageCandidates.push_back(imageId);
-    }
-    const ArtType* auxiliaryArtType = context.art == nullptr
-        ? nullptr
-        : context.art->findArtType(imageId);
-    if (auxiliaryArtType == nullptr) {
-        auxiliaryArtType = fallbackArtType;
-    }
-    std::string candidateKey;
-    for (const std::string& candidate : imageCandidates) {
-        candidateKey += "|";
-        candidateKey += toLowerAscii(candidate);
-    }
-    const std::string& mixExportsRoot =
-        cachedRuntimeMixExportsRootForContext(context, cache);
 
-    const std::string bytesCacheKey =
-        toLowerAscii(imageId)
-        + candidateKey
-        + "|bytes|"
-        + context.assetRootPath
-        + "|"
-        + context.structureRootPath
-        + "|mix="
-        + mixExportsRoot
-        + "|theater="
-        + (auxiliaryArtType != nullptr && auxiliaryArtType->theater
-            ? "1"
-            : "0");
-    auto [bytesIt, bytesInserted] =
-        cache.auxiliaryShpBytesByImage.try_emplace(bytesCacheKey);
-    RuntimeAuxiliaryShpBytesCacheEntry& bytesEntry = bytesIt->second;
-    if (bytesInserted) {
-        ++cache.auxiliaryShpBytesCacheMisses;
-    } else {
-        ++cache.auxiliaryShpBytesCacheHits;
-    }
-    if (!bytesEntry.loadAttempted) {
-        bytesEntry.loadAttempted = true;
-        const bool detailTiming =
-            runtimeRenderDetailDiagnosticsEnabled(context);
-        const auto bytesMissStart =
-            runtimeMaybeTimingStart(detailTiming);
 
-        std::string sourceName;
-        std::string errorMessage;
-
-        for (const std::string& candidate : imageCandidates) {
-            const std::string fileName = fileNameForShpImageId(candidate);
-            if (!runtimeAuxiliaryResourceUsesShpBytes(
-                    fileName,
-                    auxiliaryArtType
-                )) {
-                continue;
-            }
-            const bool sidebarResource =
-                isRuntimeSidebarResourceFileName(fileName);
-            bool loaded = false;
-            loaded = loadRuntimeResourceBytesFromMixArchives(
-                context.assetRootPath,
-                fileName,
-                cache,
-                bytesEntry.bytes,
-                sourceName,
-                errorMessage
-            );
-            if (!loaded
-                && !mixExportsRoot.empty()
-                && normalizedLowerPath(mixExportsRoot)
-                    != normalizedLowerPath(context.assetRootPath)) {
-                loaded = loadRuntimeResourceBytesFromMixArchives(
-                    mixExportsRoot,
-                    fileName,
-                    cache,
-                    bytesEntry.bytes,
-                    sourceName,
-                    errorMessage
-                );
-            }
-            if (!sidebarResource) {
-                if (!loaded) {
-                    loaded = loadRuntimeResourceBytesByName(
-                        {context.structureRootPath},
-                        context.assetRootPath,
-                        fileName,
-                        cache,
-                        bytesEntry.bytes,
-                        sourceName,
-                        errorMessage
-                    );
-                }
-            }
-            if (loaded) {
-                bytesEntry.resolvedImageId = candidate;
-                break;
-            }
-        }
-
-        if (bytesEntry.bytes.empty()) {
-            bytesEntry.loaded = false;
-            bytesEntry.errorMessage =
-                "auxiliary SHP was not found: "
-                + imageId
-                + " candidates="
-                + candidateKey
-                + " "
-                + errorMessage;
-        } else {
-            bytesEntry.loaded = true;
-            bytesEntry.sourceFingerprint = 14695981039346656037ULL;
-            for (unsigned char value : bytesEntry.bytes)
-                bytesEntry.sourceFingerprint = (bytesEntry.sourceFingerprint ^ value) * 1099511628211ULL;
-            bytesEntry.sourcePath = sourceName;
-            bytesEntry.frameCount = runtimeShpFrameCount(bytesEntry.bytes);
-            bytesEntry.errorMessage = errorMessage;
-        }
-        cache.auxiliaryShpBytesCacheMissMs +=
-            runtimeMaybeElapsedMs(detailTiming, bytesMissStart);
-    }
-    if (!bytesEntry.loaded || bytesEntry.frameCount <= 0) {
-        return nullptr;
-    }
-
-    const int availableFrameCount =
-        mainFramesOnly
-            ? runtimeVisibleMainFrameCount(bytesEntry.frameCount, true)
-            : bytesEntry.frameCount;
-    const int normalizedFrameIndex = availableFrameCount <= 0
-        ? 0
-        : positiveModulo(requestedFrameIndex, availableFrameCount);
-    const std::string cacheKey =
-        toLowerAscii(imageId)
-        + candidateKey
-        + "|frame"
-        + std::to_string(normalizedFrameIndex)
-        + (mainFramesOnly ? "|main" : "|all")
-        + "|"
-        + context.assetRootPath
-        + "|"
-        + context.structureRootPath;
-
-    auto [it, inserted] =
-        cache.auxiliaryShpSpritesByImage.try_emplace(cacheKey);
-    RuntimeObjectShpSpriteCacheEntry& entry = it->second;
-    if (inserted) {
-        ++cache.auxiliaryShpFrameCacheMisses;
-    } else {
-        ++cache.auxiliaryShpFrameCacheHits;
-    }
-    if (!entry.loadAttempted) {
-        entry.loadAttempted = true;
-        const bool detailTiming =
-            runtimeRenderDetailDiagnosticsEnabled(context);
-        const auto frameMissStart =
-            runtimeMaybeTimingStart(detailTiming);
-
-        entry.resolvedImageId = bytesEntry.resolvedImageId;
-        entry.sourceFingerprint = bytesEntry.sourceFingerprint;
-        entry.sourcePath = bytesEntry.sourcePath;
-        entry.frameCount = bytesEntry.frameCount;
-        entry.frameIndex = normalizedFrameIndex;
-        std::string errorMessage;
-        cache.lastColdResourceType = "SHP";
-        cache.lastColdResourceName = imageId.substr(0, 96);
-        ++cache.lastColdResourceSequence;
-        entry.loaded = decodeRuntimeShpFrameFromBytes(
-            bytesEntry.bytes,
-            bytesEntry.sourcePath,
-            entry.frameIndex,
-            entry.image,
-            errorMessage
-        );
-        entry.shadowFrameIndex = runtimeShpShadowFrameIndex(
-            entry.frameCount,
-            entry.frameIndex,
-            mainFramesOnly
-        );
-        if (entry.loaded && entry.shadowFrameIndex >= 0) {
-            std::string shadowError;
-            entry.hasShadowFrame = decodeRuntimeShpFrameFromBytes(
-                bytesEntry.bytes,
-                bytesEntry.sourcePath,
-                entry.shadowFrameIndex,
-                entry.shadowImage,
-                shadowError
-            );
-        }
-        entry.errorMessage = errorMessage;
-        cache.auxiliaryShpFrameCacheMissMs +=
-            runtimeMaybeElapsedMs(detailTiming, frameMissStart);
-    }
-
-    return entry.loaded ? &entry : nullptr;
-}
-
-std::size_t releaseRuntimeAuxiliaryShpImageFromCacheInternal(
-    RuntimeMapRenderCache& cache,
-    const std::string& imageId
-) {
-    const std::string normalized = toLowerAscii(trimAsciiForRender(imageId));
-    if (normalized.empty()) {
-        return 0U;
-    }
-    // Both cache-key schemas begin with the requested image followed by the
-    // first resolved-candidate separator. Requiring that separator keeps an
-    // image such as GACNST2 from being evicted together with GACNST.
-    const std::string prefix = normalized + "|";
-    const auto eraseMatches = [&prefix](auto& entries) {
-        std::size_t removed = 0U;
-        for (auto it = entries.begin(); it != entries.end();) {
-            if (it->first.rfind(prefix, 0U) == 0U) {
-                it = entries.erase(it);
-                ++removed;
-            } else {
-                ++it;
-            }
-        }
-        return removed;
-    };
-    return eraseMatches(cache.auxiliaryShpSpritesByImage)
-        + eraseMatches(cache.auxiliaryShpBytesByImage);
-}
 
 bool computeRuntimeVxlProjectedRangeFromBounds(
     const std::vector<unsigned char>& bytes,
@@ -16717,7 +14586,9 @@ RuntimeVoxelCacheEntry* loadRuntimeVoxelFromCache(
 #include "render/lighting/RuntimeAirstrikeBodyTint.inl"
 #include "render/geometry/RuntimeSpriteGeometry.inl"
 #include "render/shadows/RuntimeIndexedOpaqueSpan.h"
+static bool runtimeGpuRestoreFrozenUnderlay(const RuntimeMapRenderContext&,int);
 #include "render/buildings/RuntimeBuildingDepthRender.inl"
+#include "render/core/win32/RuntimeMapGpuObjectBridgeDeclWin32.inl"
 
 bool drawRuntimeShpFrame(
     HDC dc,
@@ -16801,6 +14672,8 @@ bool drawRuntimeShpFrame(
                         ownerRemap,remapColor,brightnessLift,vxlColorGrade,vxlPaletteLookup,255);
                     return colors;
                 };
+                if(runtimeGpuWorldTarget(context))draw.gpuMaterial=[source,pinned,context,camera,palette,ownerRemap,
+                    remapColor,brightnessLift,vxlColorGrade,vxlPaletteLookup](){return runtimeGpuPrepareSpriteMaterial(context,camera,*source,palette,ownerRemap,remapColor,brightnessLift,vxlColorGrade,vxlPaletteLookup);};
             }
             if (collectionProfile)
                 runtimeBuildingDepthFrame->profileCollection.colourCallbackMs += runtimeMaybeElapsedMs(true, colourCallbackStarted);
@@ -16843,6 +14716,8 @@ bool drawRuntimeShpFrame(
         static_cast<int>(viewport.right) - targetX
     );
 
+    if(!runtimeGpuSpriteMaterialCapture&&runtimeGpuWorldShp(dc,viewport,center,context,camera,image,palette,ownerRemap,remapColor,brightnessLift,vxlColorGrade,vxlPaletteLookup,opacity,buildingDepth,buildingDepthEnabled))return true;
+
     const RuntimeVxlColorGrade grade =
         runtimeVxlColorGradeFromEnv(vxlColorGrade, vxlPaletteLookup);
     const double extraUnitLight = vxlPaletteLookup
@@ -16871,7 +14746,7 @@ bool drawRuntimeShpFrame(
         || grade.enabled
         || std::abs(extraUnitLight) > 0.000001;
 
-    if (hasPixelSurface(context)) {
+    if (hasPixelSurface(context)||runtimeGpuSpriteMaterialCapture) {
         std::vector<std::uint32_t>& packedPalette =
             image.packedBaseColors;
         std::vector<std::uint32_t>& packedRemapPalette =
@@ -17061,6 +14936,8 @@ bool drawRuntimeShpFrame(
                 }
             }
         }
+        if(runtimeGpuCaptureSpriteMaterial(image,context,ownerRemap,remapMaskAvailable,lightLevelsAvailable,
+                vxlColorGrade&&runtimeVxlSofteningEnabled(),packedPalette,packedRemapPalette,packedLitPalette,packedLitRemapPalette))return true;
         const int clippedStartX = std::max(startX, -targetX);
         const int clippedEndX = std::min(endX, context.surfaceWidth - targetX);
         if (clippedStartX >= clippedEndX) {
@@ -17152,6 +15029,28 @@ bool drawRuntimeShpFrame(
                     );
             };
 
+        if(auto* native=concord::ui::win32::MapNativeOverlayWin32::current();native&&native->dc()==dc) {
+            if(buildingDepthEnabled||remapMaskAvailable||lightLevelsAvailable||softenVxlPixels) {
+                native->reject("map-indexed-unselected-material");return true;
+            }
+            try {
+                std::array<std::uint32_t,256> colors{};
+                for(unsigned int index=0;index<colors.size();++index) {
+                    auto color=ownerRemap&&runtimePaletteIndexIsOwnerRemap(static_cast<unsigned char>(index))
+                        ?packedRemapPalette[index]:packedPalette[index];
+                    if(context.chaosBodyTint)color=runtimeChaosTintPackedColor(color);
+                    colors[index]=runtimeAirstrikeTintPackedColor(color,context.airstrikeBodyColorAdd);
+                }
+                auto* list=native->drawList();if(!list){native->reject("map-indexed-owner");return true;}
+                concord::render::MapDrawCommand c;c.left=targetX+clippedStartX;c.top=std::max(0,targetY+startY);
+                c.right=targetX+clippedEndX;c.bottom=std::min(context.surfaceHeight,targetY+endY);
+                c.kind=concord::render::MapDrawKind::Indexed;c.originX=targetX;c.originY=targetY;
+                c.width=image.width;c.height=image.height;c.stride=c.width;c.flags=1U;
+                c.parameter=static_cast<std::uint32_t>(std::clamp(opacity,0,255));if(c.parameter<255)c.flags|=4U;if(c.parameter==0)c.flags|=8U;
+                c.offset=list->intern(image.pixels);c.palette=list->internValues<std::uint32_t>(colors);
+                (void)native->emit(c);return true; // No source/destination RGB loop in the selected GPU path.
+            }catch(...){native->reject("map-indexed-budget");return true;}
+        }
         const int clampedOpacity = std::clamp(opacity, 0, 255);
         const auto blendPackedColor = [clampedOpacity, chaos = context.chaosBodyTint, airstrike = context.airstrikeBodyColorAdd](
             std::uint32_t destination,
@@ -17299,7 +15198,7 @@ bool drawRuntimeShpFrame(
             if (buildingDepthEnabled
                 && !acceptRuntimeBuildingPixel(buildingDepth, imageRect, x, y, opacity)) continue;
             if(buildingDepthEnabled&&!runtimeBuildingDepthFrame->blends.empty()) {
-                const COLORREF background=GetPixel(dc,targetX+x,targetY+y);
+                const COLORREF background=concord::ui::win32::MapNativeOverlayWin32::readPixel(dc,targetX+x,targetY+y);
                 if(background!=CLR_INVALID) {
                     auto color=packRuntimeDibColor(background);
                     if(compositeRuntimeBuildingDepthPixel(imageRect,x,y,color)) {
@@ -17373,7 +15272,7 @@ bool drawRuntimeShpFrame(
             }
             const int clampedOpacity = std::clamp(opacity, 0, 255);
             if (clampedOpacity < 255) {
-                const COLORREF destinationColor = GetPixel(dc, screenX, screenY);
+                const COLORREF destinationColor = concord::ui::win32::MapNativeOverlayWin32::readPixel(dc, screenX, screenY);
                 if (destinationColor == CLR_INVALID) {
                     continue;
                 }
@@ -17408,6 +15307,8 @@ bool drawRuntimeShpFrame(
 
     return true;
 }
+
+#include "render/core/RuntimeMapGpuObjectBridge.inl"
 
 bool drawRuntimeVoxelShadowMask(
     HDC dc,
@@ -17467,6 +15368,8 @@ bool drawRuntimeVoxelShadowMask(
         image.width,
         static_cast<int>(viewport.right) - targetX
     );
+
+    if(runtimeGpuWorldShadow(dc,viewport,targetX,targetY,image.width,image.height,shadowPixels,binaryMask,false,darkenedPixels))return true;
 
     if (hasPixelSurface(context)) {
         const bool useHalfBlackFastPath = !runtimeFrameScalingReferenceForRender();
@@ -17560,7 +15463,7 @@ bool drawRuntimeVoxelShadowMask(
                 continue;
             }
 
-            const COLORREF current = GetPixel(dc, screenX, screenY);
+            const COLORREF current = concord::ui::win32::MapNativeOverlayWin32::readPixel(dc, screenX, screenY);
             if (current == CLR_INVALID) {
                 continue;
             }
@@ -17616,6 +15519,16 @@ int drawRuntimeSoftShadowEllipse(
     halfHeight = std::max(1, halfHeight);
     int darkenedPixels = 0;
     const int centerY = center.y - 1;
+    if(runtimeGpuWorldDc(dc)) {
+        try{const int width=halfWidth*2+1,height=halfHeight*2+1;std::vector<unsigned char> alphaMask(static_cast<std::size_t>(width)*height);
+            for(int y=-halfHeight;y<=halfHeight;++y)for(int x=-halfWidth;x<=halfWidth;++x){
+                const double normalized=static_cast<double>(x*x)/static_cast<double>(halfWidth*halfWidth)+static_cast<double>(y*y)/static_cast<double>(halfHeight*halfHeight);
+                if(normalized>1.0)continue;const double edge=std::clamp(normalized,0.0,1.0);
+                alphaMask[static_cast<std::size_t>(y+halfHeight)*width+x+halfWidth]=static_cast<unsigned char>(std::clamp(static_cast<int>(std::lround(static_cast<double>(maximumAlpha)*(1.0-edge)+16.0)),1,128));}
+            const auto clip=runtimeGpuWorldViewport(clipViewport,context.surfaceWidth,context.surfaceHeight);
+            (void)runtimeGpuWorldShadow(dc,clip,center.x-halfWidth,centerY-halfHeight,width,height,alphaMask,false,true,&darkenedPixels);
+        }catch(...){runtimeGpuWorldOwner->reject("world-soft-shadow-budget");}return darkenedPixels;
+    }
     for (int y = -halfHeight; y <= halfHeight; ++y) {
         for (int x = -halfWidth; x <= halfWidth; ++x) {
             const double normalized =
@@ -17645,7 +15558,7 @@ int drawRuntimeSoftShadowEllipse(
                 ++darkenedPixels;
                 continue;
             }
-            const COLORREF current = GetPixel(dc, screenX, screenY);
+            const COLORREF current = concord::ui::win32::MapNativeOverlayWin32::readPixel(dc, screenX, screenY);
             if (current == CLR_INVALID) {
                 continue;
             }
@@ -17664,21 +15577,7 @@ enum class RuntimeWaterWakeEligibility {
     Eligible
 };
 
-constexpr int RuntimeLandTypeUnknown = -1;
-constexpr int RuntimeLandTypeWater = 2;
-constexpr std::array<int, 16> RuntimeLandTypeByTmpTerrainType{{
-    0, 8, 8, 8, 8, 10, 9, 3, 3, 2, 6, 1, 1, 0, 7, 3
-}};
 
-int runtimeLandTypeForTmpImage(const RuntimeTmpSubTileImage* terrainImage) {
-    if (terrainImage == nullptr
-        || !terrainImage->hasTerrainType
-        || terrainImage->terrainType
-            >= RuntimeLandTypeByTmpTerrainType.size()) {
-        return RuntimeLandTypeUnknown;
-    }
-    return RuntimeLandTypeByTmpTerrainType[terrainImage->terrainType];
-}
 
 bool runtimeUnitUsesWaterWakeLocomotor(const UnitType& unitType) {
     const std::string locomotor =
@@ -17818,8 +15717,8 @@ void drawRuntimeVehicleTurretCue(
         pivot.y + static_cast<int>(std::lround(screenY * 6.0))
     };
 
-    SetDCPenColor(dc, RGB(30, 32, 38));
-    SetDCBrushColor(dc, runtimeObjectFallbackColor(context, object.owner));
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, RGB(30, 32, 38));
+    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, runtimeObjectFallbackColor(context, object.owner));
     MoveToEx(dc, pivot.x, pivot.y, nullptr);
     LineTo(dc, muzzle.x, muzzle.y);
     Ellipse(dc, pivot.x - 3, pivot.y - 2, pivot.x + 4, pivot.y + 3);
@@ -17978,7 +15877,7 @@ bool drawRuntimeVoxelImageSprite(
         if (runtimeVxlDebugEnabled(debugMode, "bounds")) {
             const RECT imageRect =
                 runtimeShpFrameScreenRect(drawCenter, camera, voxel->image);
-            SetDCPenColor(dc, RGB(255, 240, 40));
+            concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, RGB(255, 240, 40));
             HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
             Rectangle(
                 dc,
@@ -17994,7 +15893,7 @@ bool drawRuntimeVoxelImageSprite(
                 drawCenter.x,
                 drawCenter.y + (camera.tileHeight / 2)
             };
-            SetDCPenColor(dc, RGB(255, 64, 64));
+            concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, RGB(255, 64, 64));
             MoveToEx(dc, anchorPoint.x - 5, anchorPoint.y, nullptr);
             LineTo(dc, anchorPoint.x + 6, anchorPoint.y);
             MoveToEx(dc, anchorPoint.x, anchorPoint.y - 5, nullptr);
@@ -18002,7 +15901,7 @@ bool drawRuntimeVoxelImageSprite(
         }
         if (runtimeVxlDebugEnabled(debugMode, "pivot")) {
             const POINT pivotPoint{drawCenter.x, drawCenter.y};
-            SetDCPenColor(dc, RGB(64, 255, 255));
+            concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, RGB(64, 255, 255));
             MoveToEx(dc, pivotPoint.x - 6, pivotPoint.y, nullptr);
             LineTo(dc, pivotPoint.x + 7, pivotPoint.y);
             MoveToEx(dc, pivotPoint.x, pivotPoint.y - 6, nullptr);
@@ -23374,23 +21273,7 @@ std::string runtimeWaterWakeConfigurationSignature(
         + std::to_string(std::clamp(context.visualDetail, 0, 2));
 }
 
-void resetRuntimeWaterWakeStateInternal(RuntimeMapRenderCache& cache) {
-    cache.waterWakeActors.clear();
-    cache.waterWakeLastSpawnTickByObject.clear();
-    cache.waterWakeLastAnimationTick = -1;
-    cache.waterWakeLastUpdateTick = -1;
-    cache.waterWakeLastUpdateEligibleObjects = 0;
-    cache.waterWakeLastUpdateEmissions = 0;
-    cache.waterWakeLastUpdateSuppressedNotMoving = 0;
-    cache.waterWakeLastUpdateSuppressedNotWater = 0;
-    cache.waterWakeLastUpdateSuppressedSubmerged = 0;
-    cache.waterWakeConfigurationSignature.clear();
-    cache.terrainLookupWorld = nullptr;
-    cache.terrainLookupData = nullptr;
-    cache.terrainLookupCount = 0;
-    cache.terrainByCell.clear();
-    cache.terrainByCellIndex.clear();
-}
+
 
 int runtimeWaterWakeFrameDelayTicks(const ArtType& artType) {
     if (artType.rate <= 0) {
@@ -25743,7 +23626,7 @@ void drawRuntimeBuildProgressOverlay(
         && baseRect->bottom > baseRect->top;
     const int top = hasBaseRect ? baseRect->top - 8 : center.y - 92;
     const int bottom = hasBaseRect ? baseRect->bottom - 8 : center.y - 18;
-    SetDCPenColor(dc, RGB(104, 214, 168));
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, RGB(104, 214, 168));
     for (int index = 0; index < 4; ++index) {
         const int x = center.x - halfWidth + index * ((halfWidth * 2) / 3);
         MoveToEx(dc, x, bottom, nullptr);
@@ -25766,9 +23649,9 @@ void drawRuntimeBuildProgressOverlay(
         frame.left + 1 + ((frame.right - frame.left - 2) * done) / total,
         frame.bottom - 1
     };
-    SetDCBrushColor(dc, RGB(7, 10, 14));
+    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, RGB(7, 10, 14));
     Rectangle(dc, frame.left, frame.top, frame.right, frame.bottom);
-    SetDCBrushColor(dc, RGB(90, 226, 126));
+    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, RGB(90, 226, 126));
     FillRect(dc, &fill, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
 }
 
@@ -25811,15 +23694,15 @@ void drawVoxelProxyShape(
         {center.x, center.y + halfHeight}
     };
 
-    SetDCPenColor(dc, outline);
-    SetDCBrushColor(dc, sideColor);
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, outline);
+    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, sideColor);
     Polygon(dc, front, 4);
-    SetDCBrushColor(dc, shadeColor(sideColor, 18));
+    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, shadeColor(sideColor, 18));
     Polygon(dc, right, 4);
-    SetDCBrushColor(dc, topColor);
+    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, topColor);
     Polygon(dc, top, 4);
 
-    SetDCPenColor(dc, owner);
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, owner);
     MoveToEx(dc, center.x - halfWidth / 2, center.y - bodyHeight, nullptr);
     LineTo(dc, center.x + halfWidth / 2 + 1, center.y - bodyHeight);
 
@@ -25827,7 +23710,7 @@ void drawVoxelProxyShape(
         (static_cast<double>(object.facing) / 256.0) * 6.283185307179586;
     const int dx = static_cast<int>(std::sin(radians) * (halfWidth + 4));
     const int dy = static_cast<int>(-std::cos(radians) * (halfHeight + 5));
-    SetDCPenColor(dc, RGB(28, 32, 38));
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, RGB(28, 32, 38));
     MoveToEx(dc, center.x, center.y - bodyHeight, nullptr);
     LineTo(dc, center.x + dx, center.y - bodyHeight + dy);
 }
@@ -26506,6 +24389,8 @@ bool drawTmpTileImage(
         static_cast<int>(viewport.right) - targetX
     );
 
+    if(runtimeGpuWorldIndexed(dc,viewport,imageRect.left,imageRect.top,image.width,image.height,image.pixels,palette))return true;
+
     if (hasPixelSurface(context)) {
         std::array<std::uint32_t, 256> packedPalette{};
         for (int paletteIndex = 0; paletteIndex < 256; ++paletteIndex) {
@@ -26654,6 +24539,8 @@ bool drawTmpTileOverlayImage(
         image.extraWidth,
         static_cast<int>(viewport.right) - targetX
     );
+
+    if(runtimeGpuWorldIndexed(dc,viewport,imageRect.left,imageRect.top,image.extraWidth,image.extraHeight,image.extraPixels,palette))return true;
 
     if (hasPixelSurface(context)) {
         std::array<std::uint32_t, 256> packedPalette{};
@@ -26871,6 +24758,15 @@ bool drawTmpTileResourceMaskImage(
             "resource-pixels="
             + std::to_string(nonZeroPixels)
         );
+    }
+
+    if(runtimeGpuWorldDc(dc)) {
+        if(!hasPackedBase)return runtimeGpuWorldIndexed(dc,viewport,center.x-camera.tileWidth/2+image.offsetX,center.y-camera.tileHeight/2+image.offsetY,image.width,image.height,image.pixels,palette);
+        try{std::vector<unsigned char> rectangular(static_cast<std::size_t>(image.baseWidth)*image.baseHeight);std::size_t sourceIndex=0;int rowWidth=0;
+            for(int y=0;y<image.baseHeight;++y){rowWidth+=y<image.baseHeight/2?4:-4;const int left=(image.baseWidth-rowWidth)/2;
+                for(int x=0;x<rowWidth;++x){if(sourceIndex>=image.basePixels.size())break;rectangular[static_cast<std::size_t>(y)*image.baseWidth+left+x]=image.basePixels[sourceIndex++];}}
+            return runtimeGpuWorldIndexed(dc,viewport,center.x-camera.tileWidth/2+image.baseOffsetX,center.y-camera.tileHeight/2+image.baseOffsetY,image.baseWidth,image.baseHeight,rectangular,palette);
+        }catch(...){runtimeGpuWorldOwner->reject("world-resource-indexed-budget");return true;}
     }
 
     if (!hasPackedBase) {
@@ -28367,156 +26263,46 @@ bool drawRuntimeBridgeOverlaySprite(
 
 #include "render/terrain/RuntimeBridgeViewportBounds.inl"
 
+class RuntimeTerrainTmpRendererMemoPort final : public RuntimeTerrainTmpMemoPort {
+public:
+    RuntimeTerrainTmpRendererMemoPort(
+        const RuntimeMapRenderContext& context, RuntimeMapRenderCache& cache
+    ) : context_(context), cache_(cache) {}
+    bool find(
+        int tileIndex, RuntimeTmpTileFile*& file, bool& updatesLastLoadError
+    ) override {
+        return findRuntimeGeometryTerrainTile(
+            tileIndex, context_, cache_, file, updatesLastLoadError
+        );
+    }
+    void remember(
+        int tileIndex, RuntimeTmpTileFile* file, bool updatesLastLoadError
+    ) override {
+        rememberRuntimeGeometryTerrainTile(
+            tileIndex, context_, cache_, file, updatesLastLoadError
+        );
+    }
+private:
+    const RuntimeMapRenderContext& context_;
+    RuntimeMapRenderCache& cache_;
+};
+
 std::string runtimeTerrainTileLookupCacheRoot(
     const RuntimeMapRenderContext& context
 ) {
-    return normalizedLowerPath(context.tileRootPath)
-        + "|asset="
-        + normalizedLowerPath(context.assetRootPath)
-        + "|theater="
-        + (
-            context.theater == nullptr
-                ? std::string{}
-                : toLowerAscii(context.theater->getTileExtension())
-        );
-}
-
-constexpr const char* runtimeTerrainMixResourcePrefix = "@mix-resource:";
-
-bool runtimeTerrainTileLocatorIsMixResource(const std::string& locator) {
-    return locator.rfind(runtimeTerrainMixResourcePrefix, 0) == 0;
-}
-
-std::string runtimeTerrainTileResourceName(const std::string& locator) {
-    return runtimeTerrainTileLocatorIsMixResource(locator)
-        ? locator.substr(std::char_traits<char>::length(
-            runtimeTerrainMixResourcePrefix
-        ))
-        : std::string{};
-}
-
-RuntimeTmpTileFile* loadRuntimeTerrainTileForIndexUnmemoized(
-    int tileIndex,
-    const RuntimeMapRenderContext& context,
-    RuntimeMapRenderCache& cache
-) {
-    if (context.theater == nullptr
-        || (context.tileRootPath.empty() && context.assetRootPath.empty())) {
-        return nullptr;
-    }
-
-    const std::string lookupRoot =
-        runtimeTerrainTileLookupCacheRoot(context);
-    if (cache.terrainTilePathCacheRoot != lookupRoot) {
-        cache.terrainTilePathCacheRoot = lookupRoot;
-        cache.terrainTilePathByIndex.clear();
-        cache.missingTerrainTilePathByIndex.clear();
-    }
-
-    std::string assetRootPath = context.assetRootPath;
-    if (assetRootPath.empty()) {
-        assetRootPath = cachedRuntimeMixExportsRootForContext(context, cache);
-    }
-    const std::vector<std::string> rootPaths = {
-        context.tileRootPath,
-        context.assetRootPath,
-        context.structureRootPath
-    };
-    const auto loadLocator = [&](const std::string& locator) {
-        if (runtimeTerrainTileLocatorIsMixResource(locator)) {
-            return loadRuntimeTmpTileByNameFromCache(
-                rootPaths,
-                assetRootPath,
-                runtimeTerrainTileResourceName(locator),
-                cache
-            );
-        }
-        return loadRuntimeTmpTileFromCache(locator, cache);
-    };
-
-    const auto cachedPath = cache.terrainTilePathByIndex.find(tileIndex);
-    if (cachedPath != cache.terrainTilePathByIndex.end()) {
-        return loadLocator(cachedPath->second);
-    }
-    if (cache.missingTerrainTilePathByIndex.find(tileIndex)
-        != cache.missingTerrainTilePathByIndex.end()) {
-        return nullptr;
-    }
-
-    // Preserve an explicitly configured tile outside the default export root.
-    // For normal exports, original theater MIX payloads take precedence over
-    // loose copies; loose-only custom installations remain usable.
-    const TheaterTileReference reference =
-        context.theater->resolveTileIndex(tileIndex, context.tileRootPath);
-    if (!reference.validTileSet) {
-        cache.missingTerrainTilePathByIndex.insert(tileIndex);
-        return nullptr;
-    }
-
-    if (reference.fileExists && !reference.resolvedPath.empty()
-        && !runtimePathUsesDefaultAssetRoot(reference.resolvedPath, assetRootPath)) {
-        if (RuntimeTmpTileFile* tileFile =
-                loadRuntimeTmpTileFromCache(reference.resolvedPath, cache)) {
-            cache.terrainTilePathByIndex.emplace(
-                tileIndex,
-                reference.resolvedPath
-            );
-            return tileFile;
-        }
-    }
-
-    for (const std::string& fileName : reference.candidateFileNames) {
-        RuntimeTmpTileFile* tileFile =
-            loadRuntimeTmpTileByNameFromCache(
-                rootPaths,
-                assetRootPath,
-                fileName,
-                cache
-            );
-        if (tileFile == nullptr) {
-            continue;
-        }
-
-        cache.terrainTilePathByIndex.emplace(
-            tileIndex,
-            std::string(runtimeTerrainMixResourcePrefix) + fileName
-        );
-        return tileFile;
-    }
-
-    if (reference.fileExists && !reference.resolvedPath.empty()
-        && !runtimeAssetRootHasMixArchives(assetRootPath, cache)) {
-        if (RuntimeTmpTileFile* tileFile =
-                loadRuntimeTmpTileFromCache(reference.resolvedPath, cache)) {
-            cache.terrainTilePathByIndex.emplace(
-                tileIndex,
-                reference.resolvedPath
-            );
-            return tileFile;
-        }
-    }
-
-    cache.missingTerrainTilePathByIndex.insert(tileIndex);
-    return nullptr;
+    return ::runtimeTerrainTileLookupCacheRoot(
+        runtimeTerrainTmpContextForRender(context)
+    );
 }
 
 RuntimeTmpTileFile* loadRuntimeTerrainTileForIndex(
     int tileIndex, const RuntimeMapRenderContext& context, RuntimeMapRenderCache& cache
 ) {
-    RuntimeTmpTileFile* file = nullptr;
-    bool updatesLastLoadError = false;
-    if (findRuntimeGeometryTerrainTile(tileIndex, context, cache, file, updatesLastLoadError)) {
-        // MIX cache hits update this diagnostic; loose-file and resolved-miss
-        // hits preserve the previous error exactly like the original paths.
-        if (updatesLastLoadError && file) cache.lastTmpTileLoadError = file->errorMessage;
-        return file;
-    }
-    file = loadRuntimeTerrainTileForIndexUnmemoized(tileIndex, context, cache);
-    const auto locator = cache.terrainTilePathByIndex.find(tileIndex);
-    updatesLastLoadError = file && locator != cache.terrainTilePathByIndex.end()
-        && runtimeTerrainTileLocatorIsMixResource(locator->second);
-    rememberRuntimeGeometryTerrainTile(tileIndex, context, cache, file, updatesLastLoadError);
-    return file;
+    RuntimeTerrainTmpResourceByteSource source(cache, &context);
+    RuntimeTerrainTmpRendererMemoPort memo(context, cache);
+    return ::loadRuntimeTerrainTileForIndex(
+        tileIndex, runtimeTerrainTmpContextForRender(context), cache, source, memo
+    );
 }
 
 const RuntimeTmpSubTileImage* resolveTerrainVisualCellImage(
@@ -28619,26 +26405,12 @@ const RuntimeTmpSubTileImage* resolveRuntimeTerrainMetadata(
     const RuntimeMapRenderContext& context,
     RuntimeMapRenderCache& cache
 ) {
-    if (context.theater == nullptr
-        || (context.tileRootPath.empty() && context.assetRootPath.empty())
-        || tileIndex < 0
-        || tileIndex == 65535
-        || subTileIndex < 0) {
-        return nullptr;
-    }
-
-    RuntimeTmpTileFile* tileFile = loadRuntimeTerrainTileForIndex(
-        tileIndex,
-        context,
-        cache
+    RuntimeTerrainTmpResourceByteSource source(cache, &context);
+    RuntimeTerrainTmpRendererMemoPort memo(context, cache);
+    return ::resolveRuntimeTerrainMetadata(
+        tileIndex, subTileIndex, runtimeTerrainTmpContextForRender(context),
+        cache, source, memo
     );
-    if (tileFile == nullptr
-        || static_cast<std::size_t>(subTileIndex) >= tileFile->images.size()) {
-        return nullptr;
-    }
-    const RuntimeTmpSubTileImage& image =
-        tileFile->images[static_cast<std::size_t>(subTileIndex)];
-    return image.present && image.hasTerrainType ? &image : nullptr;
 }
 
 #include "render/units/RuntimeInfantrySwimAnimation.inl"
@@ -29150,7 +26922,8 @@ std::string buildTerrainLayerKey(
     const GameWorld& world,
     const RuntimeMapRenderContext& context,
     const RuntimeMapCamera& camera,
-    const RuntimeTerrainLayerRegion& region
+    const RuntimeTerrainLayerRegion& region,
+    bool materialIndices
 ) {
     const GameWorldSummary& summary = world.getSummary();
     return summary.theater
@@ -29183,6 +26956,7 @@ std::string buildTerrainLayerKey(
         + std::to_string(region.width)
         + "x"
         + std::to_string(region.height)
+        + "|gpu-material=" + (materialIndices?"1":"0")
         + "|textures="
         + (context.useTileTextures ? "1" : "0")
         + "|root="
@@ -29381,7 +27155,8 @@ bool buildTerrainLayer(
     const RuntimeMapCamera& camera,
     int viewportWidth,
     int viewportHeight,
-    RuntimeMapRenderCache& cache
+    RuntimeMapRenderCache& cache,
+    bool preserveColourEncoding = false
 ) {
     const RuntimeTerrainLayerRegion region =
         runtimeTerrainLayerRegionForViewport(
@@ -29389,8 +27164,12 @@ bool buildTerrainLayer(
             viewportWidth,
             viewportHeight
         );
+    // Surface-owner queries consume geometry only; retain existing colour storage.
+    const bool materialIndices = runtimeGpuWorldTarget(context)
+        || (preserveColourEncoding && cache.terrainLayer.built
+            && cache.terrainLayer.key.find("|gpu-material=1") != std::string::npos);
     const std::string key =
-        buildTerrainLayerKey(world, context, camera, region);
+        buildTerrainLayerKey(world, context, camera, region, materialIndices);
     if (cache.terrainLayer.built && cache.terrainLayer.key == key) {
         ++cache.terrainLayerCacheHits;
         return true;
@@ -29417,7 +27196,8 @@ bool buildTerrainLayer(
     std::array<std::uint32_t, 256> packedPalette{};
     for (int paletteIndex = 0; paletteIndex < 256; ++paletteIndex) {
         packedPalette[static_cast<std::size_t>(paletteIndex)] =
-            packDibColor(cache.palette[static_cast<std::size_t>(paletteIndex)]);
+            materialIndices?(0x80000000U|static_cast<std::uint32_t>(paletteIndex))
+                :packDibColor(cache.palette[static_cast<std::size_t>(paletteIndex)]);
     }
 
     const std::size_t pixelCount =
@@ -29890,6 +27670,18 @@ bool drawTerrainLayerToViewport(
 
     const int sourceX = destX - layerScreenX;
     const int sourceY = destY - layerScreenY;
+
+    if(runtimeGpuWorldDc(dc)) {
+        try{auto* list=runtimeGpuWorldOwner->drawList();if(!list)return true;auto c=runtimeGpuWorldRegion(destX,destY,destRight,destBottom,concord::render::MapDrawKind::Terrain);
+            c.originX=layerScreenX;c.originY=layerScreenY;c.width=layer.width;c.height=layer.height;c.stride=layer.width*4;
+            std::array<std::uint32_t,256> palette{};
+            // The decoder palette is already resident; only256 values are prepared, neverterrainRGB.
+            const auto* colors=runtimeGpuTerrainPalette;
+            if(!colors||colors->size()<256){runtimeGpuWorldOwner->reject("world-terrain-palette");return true;}
+            for(std::size_t i=0;i<palette.size();++i)palette[i]=packRuntimeDibColor((*colors)[i]);
+            c.offset=list->internValues<std::uint32_t>(layer.pixels);c.palette=list->internValues<std::uint32_t>(palette);(void)runtimeGpuWorldEmit(c);return true;
+        }catch(...){runtimeGpuWorldOwner->reject("world-terrain-budget");return true;}
+    }
 
     if (hasPixelSurface(context)
         && destX >= 0
@@ -30442,7 +28234,7 @@ void emitRuntimeRenderDiagnostics(const RuntimeMapRenderStats& stats) {
 
 std::vector<RuntimePaletteColor> runtimeOwnerRemappedUiPalette(
     const std::vector<RuntimePaletteColor>& palette,
-    COLORREF ownerColor
+    RuntimeMapColorValue ownerColor
 ) {
     if (palette.size() < 256) return {};
     auto remapped = palette;
@@ -30644,11 +28436,13 @@ bool pickRuntimeMapSurfaceCell(
     const GameWorld& world,
     const RuntimeMapRenderContext& context,
     const RuntimeMapCamera& camera,
-    const RECT& viewport,
-    POINT screenPoint,
+    const RuntimeInputPixelRect& viewportPixels,
+    RuntimeInputPixelPoint screenPixels,
     RuntimeMapRenderCache& cache,
-    POINT& cell
+    RuntimeMapSurfaceCell& cell
 ) {
+    const RECT viewport = runtimeRenderPlacementNativeRect(viewportPixels);
+    const POINT screenPoint = runtimeRenderPlacementNativePoint(screenPixels);
     if (!context.useTileTextures || camera.tileWidth <= 0 || camera.tileHeight <= 0
         || viewport.right <= viewport.left || viewport.bottom <= viewport.top
         || screenPoint.x < viewport.left || screenPoint.x >= viewport.right
@@ -30657,7 +28451,7 @@ bool pickRuntimeMapSurfaceCell(
     }
     RuntimeRendererEnvironmentScope environmentScope;
     if (!buildTerrainLayer(world, context, camera,
-            viewport.right - viewport.left, viewport.bottom - viewport.top, cache)) {
+            viewport.right - viewport.left, viewport.bottom - viewport.top, cache, true)) {
         return false;
     }
     const auto& layer = cache.terrainLayer;
@@ -30686,10 +28480,10 @@ struct RuntimeGeometryQueryScope::Impl {
     }
 };
 
-RuntimeGeometryQueryScope::RuntimeGeometryQueryScope(const GameWorld& world, const RECT& viewport,
+RuntimeGeometryQueryScope::RuntimeGeometryQueryScope(const GameWorld& world, const RuntimeInputPixelRect& viewport,
     const RuntimeMapRenderContext& context, const RuntimeMapCamera& camera, RuntimeMapRenderCache& cache,
     bool viewportStructureGeometryOnly)
-    : impl_(std::make_unique<Impl>(world, viewport, context, camera, cache, viewportStructureGeometryOnly)) {}
+    : impl_(std::make_unique<Impl>(world, runtimeRenderPlacementNativeRect(viewport), context, camera, cache, viewportStructureGeometryOnly)) {}
 RuntimeGeometryQueryScope::~RuntimeGeometryQueryScope() = default;
 
 RuntimeVehicleBodyPose resolveRuntimeVehicleBodyPose(
@@ -30697,7 +28491,7 @@ RuntimeVehicleBodyPose resolveRuntimeVehicleBodyPose(
     const RuntimeMapRenderContext& context, RuntimeMapRenderCache& cache) {
     const RECT viewport{};
     const RuntimeMapCamera camera{};
-    RuntimeGeometryQueryScope scope(world, viewport, context, camera, cache);
+    RuntimeGeometryQueryScope scope(world, runtimeRenderPlacementPixelRect(viewport), context, camera, cache);
     return runtimeVehicleBodyPoseForRender(object, context);
 }
 
@@ -30708,28 +28502,23 @@ bool resolveRuntimeTerrainTileGridShape(
     int& gridWidth,
     int& gridHeight
 ) {
-    gridWidth = 0;
-    gridHeight = 0;
-    if (cell.tileIndex < 0 || cell.tileIndex == 65535 || cell.subTileIndex < 0) {
-        return false;
-    }
-    const RuntimeTmpTileFile* tileFile = loadRuntimeTerrainTileForIndex(
-        cell.tileIndex, context, cache);
-    if (tileFile == nullptr || tileFile->gridWidth <= 0 || tileFile->gridHeight <= 0
-        || static_cast<std::size_t>(cell.subTileIndex) >= tileFile->images.size()
-        || static_cast<std::size_t>(tileFile->gridWidth) * tileFile->gridHeight
-            != tileFile->images.size()) {
-        return false;
-    }
-    gridWidth = tileFile->gridWidth;
-    gridHeight = tileFile->gridHeight;
-    return true;
+    RuntimeTerrainTmpResourceByteSource source(cache, &context);
+    RuntimeTerrainTmpRendererMemoPort memo(context, cache);
+    return ::resolveRuntimeTerrainTmpTileGridShape(
+        cell.tileIndex, cell.subTileIndex,
+        runtimeTerrainTmpContextForRender(context), cache, source, memo,
+        gridWidth, gridHeight
+    );
 }
 
 unsigned char resolveRuntimeTerrainSubTileRampType(
     const TerrainCell& cell, const RuntimeMapRenderContext& context, RuntimeMapRenderCache& cache) {
-    const auto* image = resolveRuntimeTerrainMetadata(cell.tileIndex, cell.subTileIndex, context, cache);
-    return image && image->present ? image->rampType : 0;
+    RuntimeTerrainTmpResourceByteSource source(cache, &context);
+    RuntimeTerrainTmpRendererMemoPort memo(context, cache);
+    return ::resolveRuntimeTerrainSubTileRampType(
+        cell.tileIndex, cell.subTileIndex,
+        runtimeTerrainTmpContextForRender(context), cache, source, memo
+    );
 }
 
 RuntimeTerrainLandType resolveRuntimeTerrainSubTileLandType(
@@ -30737,16 +28526,12 @@ RuntimeTerrainLandType resolveRuntimeTerrainSubTileLandType(
     const RuntimeMapRenderContext& context,
     RuntimeMapRenderCache& cache
 ) {
-    const RuntimeTmpSubTileImage* image = resolveRuntimeTerrainMetadata(
-        cell.tileIndex,
-        cell.subTileIndex,
-        context,
-        cache
+    RuntimeTerrainTmpResourceByteSource source(cache, &context);
+    RuntimeTerrainTmpRendererMemoPort memo(context, cache);
+    return ::resolveRuntimeTerrainSubTileLandType(
+        cell.tileIndex, cell.subTileIndex,
+        runtimeTerrainTmpContextForRender(context), cache, source, memo
     );
-    const int landType = runtimeLandTypeForTmpImage(image);
-    return landType == RuntimeLandTypeUnknown
-        ? RuntimeTerrainLandType::Unknown
-        : static_cast<RuntimeTerrainLandType>(landType);
 }
 
 const RuntimeTmpSubTileImage* resolveRuntimeTerrainVisualCellImage(
@@ -31247,21 +29032,19 @@ bool prewarmRuntimeStructureTurretVoxelFacingForRender(
     return false;
 }
 
-POINT runtimeStructureTurretAnimScreenOffsetForRender(
+RuntimeInputPixelPoint runtimeStructureTurretAnimScreenOffsetForRender(
     const BuildingType& buildingType,
     const std::string& structureType,
     int footprintWidth,
     int footprintHeight,
     const RuntimeMapCamera& camera
 ) {
-    return runtimeStructureTurretAnimScreenOffset(
+    return runtimeRenderPlacementPixelPoint(runtimeStructureTurretAnimScreenOffset(
         buildingType, structureType, footprintWidth, footprintHeight, camera
-    );
+    ));
 }
 
-void resetRuntimeWaterWakeState(RuntimeMapRenderCache& cache) {
-    resetRuntimeWaterWakeStateInternal(cache);
-}
+
 
 bool runRuntimeTheaterAuxiliaryShpAssetContractCheck(
     const RuntimeMapRenderContext& context,
@@ -35642,26 +33425,15 @@ bool runtimeObjectUsesAircraftSpriteForRender(
     return runtimeObjectLooksAircraftForRender(object, context);
 }
 
-int runtimeAircraftSpriteLiftPixels(
-    const WorldObjectInstance& object,
-    bool aircraft
-) {
-    if (!aircraft || !object.airborne || object.mission == "CrashingWreck") {
-        return 0;
-    }
-    if (object.aircraftDockFlightProgress >= 0.0) {
-        return static_cast<int>(std::lround(34.0 * std::clamp(
-            object.aircraftDockFlightProgress, 0.0, 1.0)));
-    }
-    return 34;
-}
 
-POINT runtimeObjectBodyAnchorForRender(
+
+RuntimeInputPixelPoint runtimeObjectBodyAnchorForRender(
     const WorldObjectInstance& object,
-    const RECT& viewport,
+    const RuntimeInputPixelRect& viewportValue,
     const RuntimeMapRenderContext& context,
     const RuntimeMapCamera& camera
 ) {
+    const RECT viewport = runtimeRenderPlacementNativeRect(viewportValue);
     // Spawned missiles are drawn from their continuous missile pose, without
     // the generic aircraft lift. Hover hitboxes and health bars share it.
     if ((object.mission == "MissileFlight" || object.mission == "MissilePreparing")
@@ -35673,7 +33445,7 @@ POINT runtimeObjectBodyAnchorForRender(
                     viewport, camera), camera);
                 point.x += runtimeMuzzlePixelX(snapshot.sourceScreenOffsetX, camera, snapshot.sourceNativeFixedX);
                 point.y += runtimeMuzzlePixelY(snapshot.sourceScreenOffsetY, camera, snapshot.sourceNativeFixedY);
-                return point;
+                return runtimeRenderPlacementPixelPoint(point);
             }
         }
     }
@@ -35689,7 +33461,7 @@ POINT runtimeObjectBodyAnchorForRender(
         runtimeObjectLooksAircraftForRender(object, context)
     );
     center.y -= runtimeHoverTransportLiftPixels(object, context, camera);
-    return center;
+    return runtimeRenderPlacementPixelPoint(center);
 }
 
 bool resolveRuntimeTerrainRadarColors(
@@ -35742,6 +33514,7 @@ bool blendSurfacePixelWithBlack(
     int y,
     int alpha
 ) {
+    if(runtimeGpuWorldPixel(context,x,y,concord::render::MapDrawKind::ConstantBlend,0,alpha))return true;
     if (!hasPixelSurface(context)
         || x < 0
         || y < 0
@@ -35767,6 +33540,7 @@ bool blendSurfacePixelWithTint(
     COLORREF tint,
     int alpha
 ) {
+    if(runtimeGpuWorldPixel(context,x,y,concord::render::MapDrawKind::ConstantBlend,packRuntimeDibColor(tint),alpha))return true;
     if (!hasPixelSurface(context)
         || x < 0
         || y < 0
@@ -36402,67 +34176,9 @@ bool drawRuntimeAuxiliaryShpFrame(
     );
 }
 
-bool loadRuntimeAuxiliaryShpFrameImage(
-    const RuntimeMapRenderContext& context,
-    RuntimeMapRenderCache& cache,
-    const std::string& imageId,
-    int frameIndex,
-    RuntimeShpFrameImage& image,
-    std::string& resolvedImageId,
-    std::string& sourcePath,
-    std::string& errorMessage,
-    bool mainFramesOnly,
-    int* frameCount,
-    const ArtType* fallbackArtType
-) {
-    RuntimeObjectShpSpriteCacheEntry* entry =
-        loadRuntimeAuxiliaryShpSpriteFromCache(
-            imageId,
-            frameIndex,
-            context,
-            cache,
-            mainFramesOnly,
-            fallbackArtType
-        );
-    if (entry == nullptr || !entry->loaded) {
-        errorMessage = entry != nullptr
-            ? entry->errorMessage
-            : "auxiliary SHP was not found: " + imageId;
-        // A decoded frame failure must retain its resource path and reason;
-        // the cache loader returns null for both missing and malformed art.
-        const std::string prefix = toLowerAscii(imageId) + "|";
-        for (const auto& [key, failed] : cache.auxiliaryShpSpritesByImage) {
-            const int available = mainFramesOnly
-                ? runtimeVisibleMainFrameCount(failed.frameCount, true) : failed.frameCount;
-            if (key.rfind(prefix, 0) == 0 && !failed.loaded && available > 0
-                    && failed.frameIndex == positiveModulo(frameIndex, available)
-                    && !failed.errorMessage.empty()) {
-                errorMessage = imageId + " frame " + std::to_string(failed.frameIndex)
-                    + ": " + failed.errorMessage + " source=" + failed.sourcePath;
-                break;
-            }
-        }
-        return false;
-    }
 
-    image = entry->image;
-    if (frameCount != nullptr) {
-        *frameCount = mainFramesOnly
-            ? runtimeVisibleMainFrameCount(entry->frameCount, true)
-            : entry->frameCount;
-    }
-    resolvedImageId = entry->resolvedImageId;
-    sourcePath = entry->sourcePath;
-    errorMessage.clear();
-    return true;
-}
 
-std::size_t releaseRuntimeAuxiliaryShpImageFromCache(
-    RuntimeMapRenderCache& cache,
-    const std::string& imageId
-) {
-    return releaseRuntimeAuxiliaryShpImageFromCacheInternal(cache, imageId);
-}
+
 
 void initializeRuntimeMapCamera(
     RuntimeMapCamera& camera,
@@ -37189,7 +34905,7 @@ bool blendRuntimeParticleFallbackPixel(
     if (dc == nullptr) {
         return false;
     }
-    const COLORREF current = GetPixel(dc, x, y);
+    const COLORREF current = concord::ui::win32::MapNativeOverlayWin32::readPixel(dc, x, y);
     const COLORREF blended = current == CLR_INVALID
         ? color
         : runtimeBlendTint(current, color, opacity);
@@ -37820,6 +35536,17 @@ int applyRuntimeLocalLightsToViewport(
             continue;
         }
 
+        if(runtimeGpuWorldDc(dc)&&runtimeGpuWorldTarget(context)) {
+            const std::int64_t square=static_cast<std::int64_t>(radius)*radius;unsigned int cut=0;bool any=false;
+            for(int y=top;y<bottom&&touchedPixels<kMaximumTouchedPixels;++y)for(int x=left;x<right;++x){
+                if(touchedPixels>=kMaximumTouchedPixels)break;const auto dx=static_cast<std::int64_t>(x-center.x),dy=static_cast<std::int64_t>(y-center.y);
+                if(dx*dx+dy*dy>square)continue;++touchedPixels;any=true;cut=static_cast<unsigned>((y-top)*(right-left)+x-left+1);}
+            if(any){auto c=runtimeGpuWorldRegion(left,top,right,bottom,concord::render::MapDrawKind::LocalLight);c.originX=center.x;c.originY=center.y;c.width=radius;c.auxiliary=cut;
+                c.parameter=static_cast<std::uint32_t>(light->blue)|(static_cast<std::uint32_t>(light->green)<<8U)|(static_cast<std::uint32_t>(light->red)<<16U)|(static_cast<std::uint32_t>(light->intensity)<<24U);
+                (void)runtimeGpuWorldEmit(c);++stats.localLightsApplied;}
+            if(touchedPixels>=kMaximumTouchedPixels)break;continue;
+        }
+
         const std::int64_t radiusSquared =
             static_cast<std::int64_t>(radius) * radius;
         const std::int64_t denominator = 255LL * 255LL * radiusSquared;
@@ -37848,7 +35575,7 @@ int applyRuntimeLocalLightsToViewport(
                         + static_cast<std::size_t>(x);
                     current = colorRefFromRuntimeDibColor(*surfacePixel);
                 } else if (dc != nullptr) {
-                    current = GetPixel(dc, x, y);
+                    current = concord::ui::win32::MapNativeOverlayWin32::readPixel(dc, x, y);
                 }
                 if (current == CLR_INVALID) {
                     continue;
@@ -38705,11 +36432,12 @@ double runtimeProjectileActorProgress(
     return std::clamp(progress, 0.0, 1.0);
 }
 
-POINT runtimeProjectileActorScreenPoint(
+RuntimeInputPixelPoint runtimeProjectileActorScreenPoint(
     const RuntimeProjectileRenderActor& actor,
-    const RECT& viewport,
+    const RuntimeInputPixelRect& viewportValue,
     const RuntimeMapCamera& camera
 ) {
+    const RECT viewport = runtimeRenderPlacementNativeRect(viewportValue);
     const double progress = runtimeProjectileActorProgress(actor);
     double x = actor.currentX;
     double y = actor.currentY;
@@ -38737,7 +36465,7 @@ POINT runtimeProjectileActorScreenPoint(
             )
         );
     }
-    return point;
+    return runtimeRenderPlacementPixelPoint(point);
 }
 
 POINT runtimeProjectileActorTargetPoint(
@@ -39050,7 +36778,7 @@ void drawRuntimeTimedBombStatus(
 
     HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
     HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-    SetDCPenColor(dc, warningColor);
+    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, warningColor);
     Polygon(dc, diamond, 4);
     MoveToEx(dc, warningCenter.x, warningCenter.y - 4, nullptr);
     LineTo(dc, warningCenter.x, warningCenter.y + 2);
@@ -40177,7 +37905,7 @@ void drawRuntimeProjectileActors(
 
         POINT center = expired
             ? runtimeProjectileActorTargetPoint(actor, viewport, camera)
-            : runtimeProjectileActorScreenPoint(actor, viewport, camera);
+            : runtimeProjectileActorScreenPointWin32(actor, viewport, camera);
         const bool hasWeaponAnim = !expired && !actor.weaponAnimId.empty();
         POINT weaponAnimPoint{0, 0};
         if (hasWeaponAnim) {
@@ -40725,7 +38453,7 @@ void drawRuntimeImpactActor(
             actor.bodyCenterPresentation, camera, actor.bodyCenterSpriteOffsetY);
     if (actor.renderIntent == "diskDrain") {
         if (const auto* source = findRuntimeSpecialRenderObject(world, actor.targetObjectId))
-            center = runtimeObjectBodyAnchorForRender(*source, viewport, context, camera);
+            center = runtimeObjectBodyAnchorForRenderWin32(*source, viewport, context, camera);
     }
     if (!actor.bodyCenterAnchored
         && (actor.lifecycleState == "Impact" || actor.lifecycleState == "DeathImpact")
@@ -41020,9 +38748,9 @@ void populateRuntimeUiResourceStats(
 }
 
 bool resolveRuntimeSpawnedMissileSpriteBounds(
-    const WorldObjectInstance& object, const POINT& center,
+    const WorldObjectInstance& object, const RuntimeInputPixelPoint& center,
     const RuntimeMapRenderContext& context, const RuntimeMapCamera& camera,
-    RuntimeMapRenderCache& cache, RECT& bounds
+    RuntimeMapRenderCache& cache, RuntimeInputPixelRect& bounds
 ) {
     if (context.specialMechanismSnapshots == nullptr) return false;
     for (const auto& snapshot : *context.specialMechanismSnapshots) {
@@ -41043,7 +38771,7 @@ bool resolveRuntimeSpawnedMissileSpriteBounds(
             }
         }
         if (right < left || bottom < top) return false;
-        const auto imageBounds = runtimeShpFrameScreenRect(center, camera, image);
+        const auto imageBounds = runtimeShpFrameScreenRect(runtimeRenderPlacementNativePoint(center), camera, image);
         bounds = {imageBounds.left + left, imageBounds.top + top,
             imageBounds.left + right + 1, imageBounds.top + bottom + 1};
         return true;
@@ -41054,22 +38782,22 @@ bool resolveRuntimeSpawnedMissileSpriteBounds(
 
 bool resolveRuntimeObjectShpSpriteBounds(
     const WorldObjectInstance& object,
-    const POINT& center,
+    const RuntimeInputPixelPoint& center,
     const RuntimeMapRenderContext& context,
     const RuntimeMapCamera& camera,
     RuntimeMapRenderCache& cache,
-    RECT& spriteRect,
+    RuntimeInputPixelRect& spriteRect,
     bool stableGlobalCanvas
 ) {
-    spriteRect = RECT{0, 0, 0, 0};
+    spriteRect = RuntimeInputPixelRect{0, 0, 0, 0};
     if (const auto* disguise = runtimeCamouflageSnapshot(context, object, nullptr, true)) {
         if (const auto* image = loadRuntimeAuxiliaryTmpImage(context, cache, disguise->resourceId, 0)) {
-            spriteRect = runtimeTmpImageScreenRect(center, camera, *image);
+            spriteRect = runtimeRenderPlacementPixelRect(runtimeTmpImageScreenRect(runtimeRenderPlacementNativePoint(center), camera, *image));
             return spriteRect.right > spriteRect.left && spriteRect.bottom > spriteRect.top;
         }
         const auto* sprite = loadRuntimeAuxiliaryShpSpriteFromCache(disguise->resourceId, 0, context, cache, true);
         if (sprite != nullptr && sprite->loaded) {
-            spriteRect = runtimeShpFrameScreenRect(runtimeAuxiliaryShpAdjustedCenter(center, camera, sprite->image, 0, 0, true), camera, sprite->image);
+            spriteRect = runtimeRenderPlacementPixelRect(runtimeShpFrameScreenRect(runtimeAuxiliaryShpAdjustedCenter(runtimeRenderPlacementNativePoint(center), camera, sprite->image, 0, 0, true), camera, sprite->image));
             return spriteRect.right > spriteRect.left && spriteRect.bottom > spriteRect.top;
         }
         return false;
@@ -41081,7 +38809,7 @@ bool resolveRuntimeObjectShpSpriteBounds(
     }
 
     POINT spriteCenter = runtimeAuxiliaryShpAdjustedCenter(
-        center,
+        runtimeRenderPlacementNativePoint(center),
         camera,
         sprite->image,
         0,
@@ -41099,17 +38827,17 @@ bool resolveRuntimeObjectShpSpriteBounds(
         // per-facing frame rectangles. Their selection box is an object
         // envelope, not a frame crop, so anchor the authored global canvas
         // at the same authored origin when hidden or revealed.
-        spriteRect = runtimeShpFrameGlobalScreenRect(
+        spriteRect = runtimeRenderPlacementPixelRect(runtimeShpFrameGlobalScreenRect(
             spriteCenter,
             camera,
             sprite->image
-        );
+        ));
     } else {
-        spriteRect = runtimeShpFrameScreenRect(
+        spriteRect = runtimeRenderPlacementPixelRect(runtimeShpFrameScreenRect(
             spriteCenter,
             camera,
             sprite->image
-        );
+        ));
     }
     return spriteRect.right > spriteRect.left
         && spriteRect.bottom > spriteRect.top;
@@ -41145,11 +38873,11 @@ bool resolveRuntimeInfantryDeathCanvasPivotOffsets(
     camera.initialized = true;
     const POINT origin{0, 0};
     RECT reference{}, doubled{};
-    if (!resolveRuntimeObjectShpSpriteBounds(source, origin, canonical, camera,
+    if (!resolveRuntimeObjectShpSpriteBoundsWin32(source, origin, canonical, camera,
             cache, reference, true)) return false;
     camera.tileWidth = 120;
     camera.tileHeight = 60;
-    if (!resolveRuntimeObjectShpSpriteBounds(source, origin, canonical, camera,
+    if (!resolveRuntimeObjectShpSpriteBoundsWin32(source, origin, canonical, camera,
             cache, doubled, true)) return false;
     const auto midpoint = [](LONG first, LONG last) {
         // Match the original integer half-canvas pivot for odd dimensions,
@@ -41172,6 +38900,7 @@ bool resolveRuntimeInfantryDeathCanvasPivotOffsets(
     return true;
 }
 #include "render/buildings/RuntimeFactoryAirExitForeground.inl"
+#include "render/core/win32/RuntimeMapGpuFactoryForegroundWin32.inl"
 #include "render/terrain/RuntimeTerrainWallDepth.inl"
 #include "render/geometry/RuntimeStructureSpriteGeometry.inl"
 #include "render/geometry/RuntimeAirImpactBodyCenterRender.inl"
@@ -41265,6 +38994,8 @@ void applyRuntimeVisionOverlay(
             <= static_cast<std::size_t>(
                 std::numeric_limits<std::uint32_t>::max()
             );
+    const bool gpuVisionProducer=buildOverlayCache&&runtimeGpuVisionTarget(context.surfacePixels);
+    if(runtimeGpuVisionTarget(context.surfacePixels)&&!buildOverlayCache){concord::ui::win32::MapNativeOverlayWin32::current()->reject("map-vision-grid-unavailable");return;}
     const bool useNativeShroud = buildOverlayCache && runtimeLoadNativeShroud(context, cache);
     const std::uint64_t shroudFingerprint = useNativeShroud ? cache.nativeShroudAtlas.fingerprint : 0;
     const bool useIncrementalOverlay = buildOverlayCache
@@ -41337,6 +39068,7 @@ void applyRuntimeVisionOverlay(
             && runtimeVisionOverlayShroudMatches(overlayCache, visionGrid)));
 
     const auto applyEncodedOverlay = [&]() {
+        if(runtimeGpuVisionEncoded(overlayCache.encodedPixels,context.surfacePixels))return;
         for (const std::uint64_t encoded : overlayCache.encodedPixels) {
             const std::uint32_t offset = static_cast<std::uint32_t>(
                 encoded >> 32U
@@ -41767,8 +39499,10 @@ void applyRuntimeVisionOverlay(
                 const int worldX = (x - static_cast<int>(viewport.left) + camera.worldOffsetX) & 63;
                 const auto& color = colorRow[worldX];
                 const int opacity = solid ? 255 : std::clamp(static_cast<int>(softenedShroud[offset]) + color.mottle, 0, 250);
-                auto& pixel = context.surfacePixels[offset];
-                pixel = solid ? color.color : runtimeBlendVisionShroud(pixel, color.color, opacity);
+                if(!gpuVisionProducer) {
+                    auto& pixel = context.surfacePixels[offset];
+                    pixel = solid ? color.color : runtimeBlendVisionShroud(pixel, color.color, opacity);
+                }
                 ++stats.visionOverlayPixels;
                 if (buildOverlayCache) {
                     const std::uint32_t effect = (static_cast<std::uint32_t>(opacity) << 24U) | color.color;
@@ -41776,6 +39510,7 @@ void applyRuntimeVisionOverlay(
                 }
             }
         }
+        if(gpuVisionProducer)(void)runtimeGpuVisionEncoded(overlayCache.encodedPixels,context.surfacePixels);
         finishOverlayCache();
         return;
     }
@@ -41820,7 +39555,7 @@ void applyRuntimeVisionOverlay(
                     && softenedShroud[offset] >= 220);
             const std::uint32_t packedFogColor =
                 packRuntimeDibColor(fogColor);
-            const bool written =
+            const bool written = gpuVisionProducer || (
                 solidFog
                     // Unexplored terrain must not leak map information. The
                     // subtle variation now belongs to the fog colour itself,
@@ -41837,7 +39572,7 @@ void applyRuntimeVisionOverlay(
                         y,
                         fogColor,
                         opacity
-                    );
+                    ));
             if (written) {
                 ++stats.visionOverlayPixels;
                 if (buildOverlayCache) {
@@ -41856,18 +39591,23 @@ void applyRuntimeVisionOverlay(
             }
         }
     }
+    if(gpuVisionProducer)(void)runtimeGpuVisionEncoded(overlayCache.encodedPixels,context.surfacePixels);
     finishOverlayCache();
 }
+
+#include "render/lighting/diagnostics/RuntimeGpuLightFixtureContext.inl"
 
 RuntimeMapRenderStats drawRuntimeMap(
     HDC dc,
     const RECT& viewport,
     const GameWorld& world,
-    const RuntimeMapRenderContext& context,
+    const RuntimeMapRenderContext& inputContext,
     RuntimeMapCamera& camera,
     RuntimeMapRenderCache& cache
 ) {
+    RuntimeMapRenderContext context=inputContext;
     RuntimeRendererEnvironmentScope environmentScope;
+    RuntimeGpuLightFixtureContext lightFixture(context);
     const bool groundShadowEligibilityReference = runtimeGroundShadowEligibilityReferenceForRender();
     const bool terrainViewportFillReference = runtimeTerrainViewportFillReferenceForRender();
     const bool stageTrace = runtimeRendererEnvironmentValue("CONCORD_RENDER_STAGE_TRACE")
@@ -41912,17 +39652,21 @@ RuntimeMapRenderStats drawRuntimeMap(
     if (!camera.initialized) {
         initializeRuntimeMapCamera(camera, world, viewportWidth, viewportHeight);
     }
-    RuntimeGeometryQueryScope geometryBatch(world, viewport, context, camera, cache);
+    const auto worldDc=concord::ui::win32::MapCompositionRequestWin32::captureWorld(dc,context.surfacePixels,context.surfaceWidth,context.surfaceHeight);
+    const bool gpuWorld=worldDc!=dc;
+    if(gpuWorld){dc=worldDc;context.surfacePixels=nullptr;}
+    RuntimeGpuWorldScope worldGpuScope(gpuWorld?dc:nullptr);
+    RuntimeGeometryQueryScope geometryBatch(world, runtimeRenderPlacementPixelRect(viewport), context, camera, cache);
     recordRuntimeParticleRenderSnapshots(context, stats);
 
     const HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
     const HGDIOBJ oldPen = SelectObject(dc, GetStockObject(DC_PEN));
 
-    SetDCBrushColor(dc, RGB(15, 22, 31));
+    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, RGB(15, 22, 31));
     const bool immediateViewportFill = context.effectOnlyProbe || terrainViewportFillReference;
     if (immediateViewportFill) {
         RuntimePerfTraceScope fillTrace("map.terrainViewportFill", context.animationTick);
-        FillRect(dc, &viewport, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+        if(!runtimeGpuWorldFill(dc,viewport,0x000F161FU))FillRect(dc, &viewport, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
         runtimeCountTerrainViewportFill(cache.terrainViewportFillCalls);
         if (runtimeTerrainViewportFillObservation) ++runtimeTerrainViewportFillObservation->fills;
     }
@@ -42032,7 +39776,7 @@ RuntimeMapRenderStats drawRuntimeMap(
             dc, viewport, context, camera, cache.terrainLayer);
         if (!omitFill) {
             RuntimePerfTraceScope fillTrace("map.terrainViewportFill", context.animationTick);
-            FillRect(dc, &viewport, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
+            if(!runtimeGpuWorldFill(dc,viewport,0x000F161FU))FillRect(dc, &viewport, static_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
             runtimeCountTerrainViewportFill(cache.terrainViewportFillCalls);
         } else runtimeCountTerrainViewportFill(cache.terrainViewportFillElisions);
         if (runtimeTerrainViewportFillObservation) {
@@ -42040,6 +39784,7 @@ RuntimeMapRenderStats drawRuntimeMap(
             else ++runtimeTerrainViewportFillObservation->fills;
         }
     }
+    RuntimeGpuTerrainPaletteLease gpuTerrainPaletteLease(gpuWorld?&cache.palette:runtimeGpuTerrainPalette);
     const auto terrainBlitStart = runtimeMaybeTimingStart(stageTiming);
     const bool terrainLayerDrawn =
         terrainLayerBuilt
@@ -42930,8 +40675,8 @@ RuntimeMapRenderStats drawRuntimeMap(
             }
         }
         if (!drewTerrainSprite) {
-            SetDCBrushColor(dc, RGB(30, 111, 72));
-            SetDCPenColor(dc, RGB(8, 48, 34));
+            concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, RGB(30, 111, 72));
+            concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, RGB(8, 48, 34));
             Ellipse(dc, center.x - 4, center.y - 8, center.x + 5, center.y + 1);
         }
         ++stats.visibleTerrainObjects;
@@ -43269,11 +41014,11 @@ RuntimeMapRenderStats drawRuntimeMap(
         RuntimeSpriteGeometryObservationScope bodyObservationScope(observeMobile ? &observedBody : nullptr);
         bool mobileBodyResolved = false;
         const auto prepareFallbackDrawing = [&] {
-            SetDCBrushColor(
+            concord::ui::win32::MapNativeOverlayWin32::setBrushColor(
                 dc,
                 runtimeObjectFallbackColor(context, object.owner)
             );
-            SetDCPenColor(dc, RGB(7, 10, 14));
+            concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, RGB(7, 10, 14));
         };
 
         const auto protection = specialObjectLookup.find(object.instanceId);
@@ -43363,8 +41108,8 @@ RuntimeMapRenderStats drawRuntimeMap(
             } else {
                 prepareFallbackDrawing();
                 if (runtimeObjectIsRenderableRubble(object)) {
-                    SetDCBrushColor(dc, RGB(82, 78, 70));
-                    SetDCPenColor(dc, RGB(34, 31, 28));
+                    concord::ui::win32::MapNativeOverlayWin32::setBrushColor(dc, RGB(82, 78, 70));
+                    concord::ui::win32::MapNativeOverlayWin32::setPenColor(dc, RGB(34, 31, 28));
                     POINT debris[6] = {
                         {center.x - 11, center.y - 2},
                         {center.x - 5, center.y - 8},
@@ -44348,6 +42093,7 @@ RuntimeMapRenderStats drawRuntimeMap(
         if (bodyViewport.bottom <= bodyViewport.top) continue;
         ++stats.airborneForegroundBodiesDrawn;
         RuntimeFactoryAirExitOcclusionPixels foregroundPixels;
+        std::optional<RuntimeGpuFactoryForegroundScope> gpuForeground;
         const RuntimeWorldObjectDrawRecord* foregroundHost = nullptr;
         RECT foregroundClip{};
         if (drawRecord.object->factoryExitHostId >= 0) {
@@ -44355,11 +42101,12 @@ RuntimeMapRenderStats drawRuntimeMap(
                 if (!host.object || host.instanceId != drawRecord.object->factoryExitHostId
                     || !runtimeAircraftOverStructureFoundation(drawRecord, host)) continue;
                 RECT bodyBounds{};
-                if (resolveRuntimeMobileObjectSpriteBounds(*drawRecord.object, liftedRecord.center,
+                if (resolveRuntimeMobileObjectSpriteBoundsWin32(*drawRecord.object, liftedRecord.center,
                         context, camera, cache, bodyBounds)
                     && IntersectRect(&foregroundClip, &bodyBounds, &bodyViewport)) {
                     foregroundHost = &host;
-                    foregroundPixels = captureRuntimeFactoryAirExitForegroundPixels(foregroundClip,
+                    if(runtimeGpuWorldTarget(context))gpuForeground.emplace(foregroundClip,*host.object,host.center,context,camera,cache);
+                    else foregroundPixels = captureRuntimeFactoryAirExitForegroundPixels(foregroundClip,
                         *host.object, host.center, context, camera, cache);
                 }
                 break;
@@ -44367,7 +42114,8 @@ RuntimeMapRenderStats drawRuntimeMap(
         }
         drawWorldObjectRecord(liftedRecord, &bodyViewport);
         if (foregroundHost) {
-            if (hasPixelSurface(context)) {
+            if(gpuForeground)gpuForeground->finish();
+            else if (hasPixelSurface(context)) {
                 for (const auto& [index, pixel] : foregroundPixels) context.surfacePixels[index] = pixel;
             } else {
                 drawRuntimeFactoryAirExitForeground(dc, foregroundClip, *foregroundHost->object,
@@ -44442,10 +42190,13 @@ RuntimeMapRenderStats drawRuntimeMap(
 
     // BEHIND is authored on the top layer with normal light. Keep its silver
     // palette above buildings/world lighting while respecting the shroud.
-    drawRuntimeBehindMarkers(dc, viewport, context, camera, cache, stats, behindMarkers);
+    context.surfacePixels=inputContext.surfacePixels;
+    const auto mapOverlayDc=concord::ui::win32::MapCompositionRequestWin32::capture(
+        dc,context.surfacePixels,context.surfaceWidth,context.surfaceHeight);
+    drawRuntimeBehindMarkers(mapOverlayDc, viewport, context, camera, cache, stats, behindMarkers);
     const auto visionStart = runtimeMaybeTimingStart(stageTiming);
     applyRuntimeVisionOverlay(
-        dc,
+        mapOverlayDc,
         viewport,
         world,
         context,
@@ -44456,6 +42207,7 @@ RuntimeMapRenderStats drawRuntimeMap(
     stats.visionMs = runtimeMaybeElapsedMs(stageTiming, visionStart);
     traceStage("vision-ready");
 
+    if(mapOverlayDc!=dc){SelectObject(mapOverlayDc,oldBrush);SelectObject(mapOverlayDc,oldPen);}
     SelectObject(dc, oldBrush);
     SelectObject(dc, oldPen);
     stats.rendered = true;
@@ -44550,3 +42302,203 @@ bool runRuntimePlayerCheerSequenceCheck(std::string& error) {
 #include "render/geometry/diagnostics/RuntimePaintProjectionSignatureContractOracle.inl"
 #include "render/shadows/diagnostics/RuntimeVehicleGroundShadowIssue22Smoke.inl"
 #include "render/units/diagnostics/RuntimeHoverTransportIssue24Smoke.inl"
+
+namespace {
+std::size_t grandCannonCacheCharge(const RuntimeShpFrameImage& image) {
+    // Charge the installed lifetime, including future lazy render caches.
+    // The pinned Microsoft vector grows by at most 1.5x; allow 2x capacity.
+    // Palette changes replace two 256-entry tables, never append variants.
+    const auto pixels = static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height);
+    constexpr std::size_t metadata = 65536;
+    constexpr std::size_t colors = 2U * 256U * sizeof(std::uint32_t);
+    constexpr std::size_t shadows = 4U * RuntimeShadowOpaqueSpanCache::MaximumSpans * sizeof(RuntimeShadowOpaqueSpan);
+    return pixels * (13U + 2U * sizeof(RuntimeSpriteHitSpan)) + metadata + colors + shadows;
+}
+std::string grandCannonSourceKey(const std::string& image, const RuntimeMapRenderContext& context) {
+    return normalizedLowerPath(context.assetRootPath) + "|vxl=" + toLowerAscii(fileNameForVxlImageId(image))
+        + "|hva=" + toLowerAscii(fileNameForHvaImageId(image));
+}
+void grandCannonCheckSource(const RuntimeVoxelSourceCacheEntry& source) {
+    // Owner preparation has its own bound, including grid/face staging. It is
+    // never included in a worker payload or multiplied by the worker count.
+    const auto& bytes = source.vxlBytes;
+    if (!source.loaded || bytes.size() < 802 || bytes.size() > 2U * 1024U * 1024U
+        || source.hvaBytes.size() > 65536 || source.firstFrameTransforms.size() > 8
+        || !source.transformsByFrame.empty())
+        throw std::length_error("Grand Cannon source exceeds the bounded prewarm profile");
+    const auto sections = readUInt32(bytes, 20);
+    const auto footer = 802ULL + static_cast<std::uint64_t>(sections) * 28U + readUInt32(bytes, 28);
+    if (sections == 0 || sections > 8 || footer + sections * 92ULL > bytes.size())
+        throw std::length_error("Grand Cannon source sections exceed the bounded prewarm profile");
+    std::size_t cells = 0;
+    for (std::size_t i = 0; i < sections; ++i) {
+        const auto at = static_cast<std::size_t>(footer) + i * 92U;
+        cells += static_cast<std::size_t>(bytes[at + 88]) * bytes[at + 89] * bytes[at + 90];
+    }
+    if (cells > 1024U * 1024U) throw std::length_error("Grand Cannon source grid exceeds 1M cells");
+}
+}
+
+struct RuntimeGrandCannonPreparedFacing::Impl {
+    std::unique_ptr<RuntimeMapRenderCache> cache;
+    RuntimeGrandCannonRasterCapture capture;
+    std::size_t charge = 0;
+    int bucket = 0;
+};
+RuntimeGrandCannonPreparedFacing::RuntimeGrandCannonPreparedFacing() : impl_(std::make_unique<Impl>()) {}
+RuntimeGrandCannonPreparedFacing::~RuntimeGrandCannonPreparedFacing() = default;
+RuntimeGrandCannonPreparedFacing::SourceInfo RuntimeGrandCannonPreparedFacing::inspect(
+    const RuntimeMapRenderContext& context, const RuntimeMapRenderCache& source) {
+    SourceInfo info;
+    const auto* building = context.rules ? context.rules->findBuildingType("GTGCAN") : nullptr;
+    if (!building) throw std::runtime_error("Grand Cannon preparation has no rules");
+    const std::string barrelKey = context.assetRootPath + "|structure=gtgcan|turret=" + toLowerAscii(building->turretAnim);
+    const auto barrel = source.structureTurretBarrelImageByKey.find(barrelKey);
+    if (barrel == source.structureTurretBarrelImageByKey.end() || barrel->second.empty())
+        throw std::runtime_error("Grand Cannon default facing did not resolve its barrel");
+    const std::array<std::string, 2> sourceKeys{
+        grandCannonSourceKey(building->turretAnim, context), grandCannonSourceKey(barrel->second, context)};
+    if (context.assetRootPath.size() > 1024 || barrelKey.size() > 2048
+        || source.voxelPaletteLookupSourcePath.size() > 2048
+        || source.voxelPalette.size() > 256 || source.voxelPaletteLookup.size() > 65536)
+        throw std::length_error("Grand Cannon source metadata exceeds its bound");
+    for (const auto& key : sourceKeys) {
+        const auto found = source.voxelSourcesByImage.find(key);
+        if (found == source.voxelSourcesByImage.end()) throw std::runtime_error("Grand Cannon source was not loaded by fallback");
+        grandCannonCheckSource(found->second);
+        info.sourceBytes += found->second.vxlBytes.size() + found->second.hvaBytes.size();
+    }
+    for (const auto& [key, entry] : source.voxelObjectsByType) {
+        (void)key;
+        if (entry.facingBucket == 30 && (toLowerAscii(entry.metadata.imageId) == toLowerAscii(building->turretAnim)
+    || toLowerAscii(entry.metadata.imageId) == toLowerAscii(barrel->second))) {
+    info.fallbackCharge += grandCannonCacheCharge(entry.image);
+        }
+    }
+    if (info.fallbackCharge > RuntimeGrandCannonPrewarmJob::CacheBytes) throw std::length_error("Grand Cannon fallback cache exceeds its budget");
+
+    return info;
+}
+void RuntimeGrandCannonPreparedFacing::prepare(const RuntimeMapRenderContext& context,
+    const RuntimeMapRenderCache& source, int bucket, std::uint64_t generation) {
+    impl_->bucket = bucket;
+    const auto* building = context.rules->findBuildingType("GTGCAN");
+    const std::string barrelKey = context.assetRootPath + "|structure=gtgcan|turret=" + toLowerAscii(building->turretAnim);
+    const auto barrel = source.structureTurretBarrelImageByKey.find(barrelKey);
+    const std::array<std::string, 2> sourceKeys{grandCannonSourceKey(building->turretAnim, context), grandCannonSourceKey(barrel->second, context)};
+    impl_->cache = std::make_unique<RuntimeMapRenderCache>();
+    auto& cache = *impl_->cache;
+    // Exactly the two already-selected sources and VPL; no live
+    // cache, rules/art/theater reference survives this call.
+    for (const auto& key : sourceKeys) cache.voxelSourcesByImage.emplace(key, source.voxelSourcesByImage.at(key));
+    cache.structureTurretBarrelImageByKey.emplace(barrelKey, barrel->second);
+    cache.voxelPaletteLookupLoadAttempted = true;
+    cache.voxelPaletteLookupLoaded = source.voxelPaletteLookupLoaded;
+    cache.voxelPaletteFirstRemap = source.voxelPaletteFirstRemap;
+    cache.voxelPaletteLastRemap = source.voxelPaletteLastRemap;
+    cache.voxelPaletteSectionCount = source.voxelPaletteSectionCount;
+    cache.voxelPaletteNeutralSection = source.voxelPaletteNeutralSection;
+    cache.voxelPalette = source.voxelPalette;
+    cache.voxelPaletteLookup = source.voxelPaletteLookup;
+    cache.voxelPaletteLookupSourcePath = source.voxelPaletteLookupSourcePath;
+    impl_->capture.generation = generation;
+    {
+        struct CaptureScope {
+            RuntimeGrandCannonRasterCapture* previous;
+            explicit CaptureScope(RuntimeGrandCannonRasterCapture* value)
+                : previous(runtimeGrandCannonCapture) { runtimeGrandCannonCapture = value; }
+            ~CaptureScope() { runtimeGrandCannonCapture = previous; }
+        } scope(&impl_->capture);
+        int sprites = 0;
+        std::string error;
+        if (!prewarmRuntimeStructureTurretVoxelFacingForRender("GTGCAN", bucket, context, cache, sprites, error) || sprites != 2)
+            throw std::runtime_error(error);
+    }
+    if (cache.voxelObjectsByType.size() != 2 || cache.stableVoxelCacheKeyByLookup.size() > 2)
+        throw std::length_error("Grand Cannon private cache exceeded two part entries");
+    for (const auto& [key, entry] : cache.voxelObjectsByType) {
+        if (key.size() > 8192 || entry.image.sourcePath.size() > 2048)
+            throw std::length_error("Grand Cannon cache metadata exceeded its bound");
+        const auto bytes = grandCannonCacheCharge(entry.image);
+        if (bytes > RuntimeGrandCannonPrewarmJob::CacheBytes - impl_->charge)
+            throw std::length_error("Grand Cannon atlas exceeded 128 MiB");
+        impl_->charge += bytes;
+    }
+    // Source copies and VPL are preparation-only and are freed now.
+    cache.voxelSourcesByImage.clear();
+    std::vector<RuntimePaletteColor>{}.swap(cache.voxelPalette);
+    std::vector<unsigned char>{}.swap(cache.voxelPaletteLookup);
+
+}
+std::size_t RuntimeGrandCannonPreparedFacing::count() const noexcept { return impl_->capture.count; }
+std::size_t RuntimeGrandCannonPreparedFacing::cacheCharge() const noexcept { return impl_->charge; }
+concord::tasks::Task& RuntimeGrandCannonPreparedFacing::task(std::size_t index) { return impl_->capture.parts.at(index).task; }
+void RuntimeGrandCannonPreparedFacing::accept(std::size_t index, std::span<const std::byte> output) {
+    using namespace concord::grand_cannon;
+    auto& part = impl_->capture.parts.at(index);
+    auto& image = *part.image;
+    const auto count = static_cast<std::size_t>(image.width) * static_cast<std::size_t>(image.height);
+    if (output.size() != outputBytes(count)) {
+        throw std::runtime_error("Grand Cannon raster returned an invalid output size");
+    }
+    // One claimed result <= 1.83 MiB remains alive during this bounded copy.
+    // Destination storage was charged to the separate atlas budget BEFORE
+    // submission, not to the executor's already-released reservation.
+    const auto* data = output.data();
+    Output result{};
+    std::memcpy(&result, data, sizeof(result));
+    data += sizeof(result);
+    image.pixelMaterials.resize(count);
+    std::memcpy(image.pixelMaterials.data(), data, count * sizeof(std::uint32_t));
+    data += count * sizeof(std::uint32_t);
+    std::array<std::vector<unsigned char>*, PlaneCount> planes{
+        &image.pixels, &image.rawColorIndices, &image.ownerRemapMask, &image.lightLevels,
+        &image.normalIndices, &image.normalBrightnessLevels, &image.vplSections,
+        &image.depthLevels, part.shadow};
+    for (auto* plane : planes) {
+        const auto* begin = reinterpret_cast<const unsigned char*>(data);
+        plane->assign(begin, begin + count);
+        data += count;
+    }
+    image.rasterPathStats.cuboidFacesRasterized = result.cuboidFaces;
+    image.rasterPathStats.triangleFacesRasterized = result.triangles;
+    image.opaqueBoundsWidth = result.opaqueWidth;
+    image.opaqueBoundsHeight = result.opaqueHeight;
+    image.topFacePixelCount = result.topPixels;
+    image.sideFacePixelCount = result.sidePixels;
+    image.lowerFacePixelCount = result.lowerPixels;
+
+}
+void RuntimeGrandCannonPreparedFacing::install(RuntimeMapRenderCache& target) {
+    auto& cache = *impl_->cache;
+    target.voxelObjectsByType.reserve(target.voxelObjectsByType.size() + cache.voxelObjectsByType.size());
+    target.stableVoxelCacheKeyByLookup.reserve(target.stableVoxelCacheKeyByLookup.size() + cache.stableVoxelCacheKeyByLookup.size());
+    target.voxelObjectsByType.merge(cache.voxelObjectsByType);
+    target.stableVoxelCacheKeyByLookup.merge(cache.stableVoxelCacheKeyByLookup);
+    target.grandCannonVoxelReadyMask |= std::uint32_t{1} << impl_->bucket;
+
+    target.grandCannonVoxelPrewarmActive = target.grandCannonVoxelReadyMask != 0xffffffffU;
+    impl_->cache.reset();
+}
+
+#include "render/voxel/diagnostics/RuntimeGrandCannonPrewarmContract.inl"
+
+#include "ui/surface/win32/diagnostics/MapVisionGpuFixtureWin32.inl"
+#include "render/visibility/diagnostics/RuntimeGpuVisionOverlayContract.inl"
+
+#include "ui/surface/win32/diagnostics/MapTerrainGpuFixtureWin32.inl"
+#include "ui/surface/win32/diagnostics/MapWorldGpuFixtureWin32.inl"
+#include "render/buildings/diagnostics/RuntimeGpuFrozenWorldContract.inl"
+#include "ui/surface/win32/diagnostics/MapSpriteGpuFixtureWin32.inl"
+#include "render/units/diagnostics/RuntimeGpuSpriteMaterialContract.inl"
+#include "ui/surface/win32/diagnostics/MapOperationsGpuFixtureWin32.inl"
+#include "render/shadows/diagnostics/RuntimeGpuShadowContract.inl"
+#include "render/lighting/diagnostics/RuntimeGpuLightPrecisionContract.inl"
+#include "render/terrain/diagnostics/RuntimeGpuTerrainPickContract.inl"
+#include "render/lighting/diagnostics/RuntimeGpuLightWorldContract.inl"
+#include "render/voxel/diagnostics/RuntimeGpuVxlModeContract.inl"
+#include "render/terrain/diagnostics/RuntimeGpuTerrainContract.inl"
+
+#include "render/core/diagnostics/RuntimeAuxiliaryShpDrawingContract.inl"
+
+#include "render/effects/diagnostics/RuntimeScreenShakeDrawingContract.inl"

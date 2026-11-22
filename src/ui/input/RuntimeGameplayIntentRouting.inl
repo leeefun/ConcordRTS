@@ -1,10 +1,6 @@
 // Local input routing is gameplay infrastructure. It must not depend on an
 // optional recording/viewing session being present.
-bool runtimeUsesGameplayIntentRouter(const RuntimeWindowState& state) {
-    return state.multiplayerBridge != nullptr
-        || (!state.campaignMode && runtimeLocalObserver(state.config))
-        || state.offlineGameplayIntentRouting;
-}
+
 
 bool dispatchRuntimeOfflineGameplayCommand(RuntimeWindowState& state,
     const RuntimeMultiplayerGameplayCommand& command, std::string& error) {
@@ -13,6 +9,7 @@ bool dispatchRuntimeOfflineGameplayCommand(RuntimeWindowState& state,
         && !prevalidateRuntimeMultiplayerGameplayCommand(state,owner,command,error)) return false;
     const bool applied=applyRuntimeMultiplayerGameplayCommand(state,owner,command);
     if(applied)error.clear();else error="当前状态无法执行此操作";
+    RuntimeKeyboardParentDiagnostics::command("offline-apply", state.tick, owner, command, applied, error);
     return applied;
 }
 

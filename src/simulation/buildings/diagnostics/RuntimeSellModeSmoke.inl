@@ -113,7 +113,10 @@ bool runRuntimeSellModeSmoke(RuntimeWindowState& live, std::string& error) {
                     && selected->object->instanceId == id && cursor && cursor->instanceId == id;
             };
             for (const auto& projected : projections) if (projected.object && projected.object->instanceId == id) {
-                for (const auto p : projected.footprintHitCenters) if (hits(p)) return p;
+                for (const auto& pixel : projected.footprintHitCenters) {
+                    const auto p = runtimeRenderPlacementNativePoint(pixel);
+                    if (hits(p)) return p;
+                }
                 const POINT middle{(projected.bounds.left + projected.bounds.right) / 2,
                     (projected.bounds.top + projected.bounds.bottom) / 2};
                 if (hits(middle)) return middle;
@@ -211,8 +214,8 @@ bool runRuntimeSellModeSmoke(RuntimeWindowState& live, std::string& error) {
             return fail("illegal sale changed target/credits or exited Sell");
         stage = "complete map right click cancels Sell";
         click(*empty, true);
-        if (s.activeSidebarTool != RuntimeSidebarTool::None || s.rightDragActive || s.rightDragMoved
-            || s.selectionDragActive || !s.selectedObjectIds.empty() || s.economy.credits != stableCredits)
+        if (s.activeSidebarTool != RuntimeSidebarTool::None || s.rightPointer.active || s.rightPointer.moved
+            || s.leftPointer.active || !s.selectedObjectIds.empty() || s.economy.credits != stableCredits)
             return fail("real right down/up did not finish cancellation");
         if (!cursor(*empty, 0, true)) return false;
         stage = "third ordinary left click selects rather than sells";

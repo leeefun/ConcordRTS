@@ -1,4 +1,17 @@
+if(CONCORD_PORTABLE_CORE)
+    enable_testing()
+    return()
+endif()
+
 enable_testing()
+include("${CMAKE_CURRENT_LIST_DIR}/WorldAudioClockContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ChronosphereCallerClockContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MenuSfxClockContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MainMenuMusicClockContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/InternetMenuClockContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MainMenuPresentationClockContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/CampaignPresentationClockContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SkirmishPresentationClockContracts.cmake")
 add_test(NAME runtime_aircraft_flight_codec_smoke_test COMMAND concord_aircraft_flight_codec_smoke)
 add_test(NAME runtime_subcell_requested_index_smoke_test COMMAND concord_subcell_requested_index_smoke)
 set_tests_properties(runtime_subcell_requested_index_smoke_test PROPERTIES
@@ -562,3 +575,16 @@ add_test(NAME runtime_feature_details_integration_smoke_test COMMAND concord_run
 set_tests_properties(runtime_feature_details_integration_smoke_test PROPERTIES
     ENVIRONMENT "CONCORD_COMMAND_SMOKE_FEATURE_DETAILS_ONLY=1" TIMEOUT 180)
 
+
+if(WIN32)
+    add_test(NAME runtime_navigation_terrain_query_smoke_test COMMAND concord_runtime
+        --config "${CMAKE_SOURCE_DIR}/tests/fixtures/navigation_terrain_query_runtime.ini"
+        --command-smoke-test
+        --resource-root "${CMAKE_SOURCE_DIR}/RedAlert2"
+        --local-data-root "${CMAKE_SOURCE_DIR}/local_data"
+        --map "${CMAKE_SOURCE_DIR}/local_data/resources/mix_exports/multimd/2peaks.map")
+    set_tests_properties(runtime_navigation_terrain_query_smoke_test PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}" TIMEOUT 600 RUN_SERIAL TRUE
+        ENVIRONMENT "CONCORD_COMMAND_SMOKE_NAVIGATION_TERRAIN_QUERY_ONLY=1;CONCORD_NAVIGATION_TERRAIN_QUERY_OUTPUT=${CMAKE_BINARY_DIR}/navigation-terrain-query-output"
+        LABELS "assets;navigation-terrain;renderer-integration")
+endif()

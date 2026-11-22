@@ -80,7 +80,7 @@ bool runRuntimeCombatantSelectionSmoke(const RuntimeConfig& config, std::string&
         return view.object && view.object->instanceId == 5;
     });
     if (miner == projected.end()) return fail("miner projection unavailable");
-    const RECT bounds = miner->bounds;
+    const RECT bounds = runtimeRenderPlacementNativeRect(miner->bounds);
     const POINT point{(bounds.left+bounds.right)/2,(bounds.top+bounds.bottom)/2};
     const auto* picked = findProjectedObjectAtPoint(projected,point);
     if (!picked || !picked->object || picked->object->instanceId != 5) return fail("miner mouse fixture overlap");
@@ -89,11 +89,11 @@ bool runRuntimeCombatantSelectionSmoke(const RuntimeConfig& config, std::string&
     if (!window) return fail("selection input window");
     struct Cleanup { HWND window; ~Cleanup(){DestroyWindow(window);} } cleanup{window};
     SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(&state));
-    state.selectedObjectIds.clear(); state.selectionDragActive = true; state.selectionDragMoved = false;
+    state.selectedObjectIds.clear(); state.leftPointer.active = true; state.leftPointer.moved = false;
     runtimeWindowProc(window,WM_LBUTTONUP,0,MAKELPARAM(point.x,point.y));
     if (state.selectedObjectIds != std::vector<int>{5}) return fail("normal miner mouse click rejected");
-    state.selectedObjectIds.clear(); state.selectionDragActive = state.selectionDragMoved = true;
-    state.selectionStart = {bounds.left,bounds.top}; state.selectionCurrent = {bounds.right,bounds.bottom};
+    state.selectedObjectIds.clear(); state.leftPointer.active = state.leftPointer.moved = true;
+    state.leftPointer.start = {bounds.left,bounds.top}; state.leftPointer.current = {bounds.right,bounds.bottom};
     runtimeWindowProc(window,WM_LBUTTONUP,0,MAKELPARAM(bounds.right,bounds.bottom));
     if (std::find(state.selectedObjectIds.begin(),state.selectedObjectIds.end(),5) == state.selectedObjectIds.end())
         return fail("miner box selection rejected");

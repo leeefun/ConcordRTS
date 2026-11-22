@@ -13,6 +13,7 @@
 #include "analysis/reports/JsonExporter.h"
 #include "data/maps/MapDatabase.h"
 #include "assets/preview/MapPreviewExporter.h"
+#include "assets/preview/MapPreviewResourceContext.h"
 #include "assets/archive/MixArchive.h"
 #include "analysis/reports/ModCompatibilityScanner.h"
 #include "analysis/reports/ObjectReferenceValidator.h"
@@ -28,6 +29,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
@@ -1498,7 +1500,48 @@ static void printPerformancePlanReport(const PerformancePlanReport& report) {
     }
 }
 
+template <typename Writer>
+static bool writeAnalysisReportJson(
+    const std::string& path, const std::string& legacyOutputPath,
+    bool overwrite, const Writer& writer
+) {
+    if (path.empty()) return true;
+    std::error_code error;
+    if (!legacyOutputPath.empty()) {
+        const bool sameFile = std::filesystem::equivalent(path, legacyOutputPath, error);
+        error.clear();
+        const auto jsonPath = std::filesystem::weakly_canonical(path, error);
+        if (error) {
+            std::cerr << "Cannot resolve report JSON path: " << path << "\n";
+            return false;
+        }
+        const auto legacyPath = std::filesystem::weakly_canonical(legacyOutputPath, error);
+        if (error || sameFile || jsonPath == legacyPath) {
+            std::cerr << "Report JSON must use a different file from the legacy replay output.\n";
+            return false;
+        }
+    }
+    const bool exists = std::filesystem::exists(path, error);
+    if (error || (exists && !overwrite)) {
+        std::cerr << "Report JSON output already exists or cannot be inspected: " << path << "\n";
+        return false;
+    }
+    std::ofstream output(path, std::ios::binary);
+    if (!output) {
+        std::cerr << "Failed to open report JSON output: " << path << "\n";
+        return false;
+    }
+    writer(output);
+    output.flush();
+    if (!output) {
+        std::cerr << "Failed to write report JSON output: " << path << "\n";
+        return false;
+    }
+    return true;
+}
+
 static void printReplaySandboxReport(const ReplaySandboxReport& report) {
+    offline_report::printEvidence(std::cout, report.provenance);
     if (!report.success) {
         std::cerr << "Failed to run replay sandbox: "
                   << report.errorMessage
@@ -2566,25 +2609,23 @@ int main(int argc, char** argv) {
                     }
                 }
 
-                const bool exported = exportStructureSprites
-                    ? exportMapTmpPreviewToHtml(
-                        options.exportMapTmpHtmlPath,
-                        mapDatabase,
-                        theaterDatabase,
-                        options.tileRootPath,
-                        resolvedPalettePath,
-                        structureSpriteOptions,
-                        structureSpriteStats,
-                        errorMessage
-                    )
-                    : exportMapTmpPreviewToHtml(
-                        options.exportMapTmpHtmlPath,
-                        mapDatabase,
-                        theaterDatabase,
-                        options.tileRootPath,
-                        resolvedPalettePath,
-                        errorMessage
-                    );
+                concord::assets::MapPreviewResourceContext previewContext;
+                previewContext.packageRoot = std::filesystem::current_path().string();
+                previewContext.tileRootPath = options.tileRootPath;
+                previewContext.assetRootPath = structureSpriteOptions.assetRootPath;
+                previewContext.palettePath = resolvedPalettePath;
+                previewContext.structurePalettePath = structureSpriteOptions.structurePalettePath;
+                concord::assets::MapPreviewResourceSession previewSession(std::move(previewContext));
+                const bool exported = exportMapTmpPreviewToHtml(
+                    previewSession,
+                    options.exportMapTmpHtmlPath,
+                    mapDatabase,
+                    theaterDatabase,
+                    options.tileRootPath,
+                    resolvedPalettePath,
+                    structureSpriteOptions,
+                    structureSpriteStats,
+                    errorMessage);
 
                 if (!exported) {
                     std::cerr << "Failed to export map TMP HTML preview: "
@@ -2901,10 +2942,12 @@ int main(int argc, char** argv) {
         statusInput.evaIni = evaForStatus;
         statusInput.campaign = &campaignDatabase;
 
-        printEngineStatusReport(
-            std::cout,
-            buildEngineStatusReport(statusInput)
-        );
+        const EngineStatusReport report = buildEngineStatusReport(statusInput);
+        printEngineStatusReport(std::cout, report);
+        if (!writeAnalysisReportJson(options.reportJsonPath, "", options.overwriteOutput,
+                [&](std::ostream& output) { writeEngineStatusReportJson(output, report); })) {
+            return 1;
+        }
         break;
     }
 
@@ -3065,6 +3108,10 @@ int main(int argc, char** argv) {
                     options.runtimeReplayEventPath
                 );
         printReplaySandboxReport(report);
+        if (!writeAnalysisReportJson(options.reportJsonPath, options.outputPath, options.overwriteOutput,
+                [&](std::ostream& output) { writeReplaySandboxReportJson(output, report); })) {
+            return 1;
+        }
         if (!report.success) {
             return 1;
         }

@@ -1366,12 +1366,6 @@ bool isRa2GemOverlayIndex(int overlayIndex) {
     return overlayIndex >= 27 && overlayIndex <= 38;
 }
 
-bool isRa2OreOverlayIndex(int overlayIndex) {
-    return (overlayIndex >= 102 && overlayIndex <= 121)
-        || (overlayIndex >= 127 && overlayIndex <= 146)
-        || (overlayIndex >= 147 && overlayIndex <= 166);
-}
-
 std::string numberedOverlayResourceName(const std::string& prefix, int number) {
     std::ostringstream stream;
     stream << prefix;
@@ -3734,7 +3728,7 @@ MapFacts MapDatabase::buildMapFacts(
         // Visible low-bridge overlays are authoritative. Original maps place
         // them over several terrain classes, including clear and road cells.
         cell->isLowBridge = isLowBridgeOverlayFact(overlay);
-        const bool overlayIsBridge =
+        [[maybe_unused]] const bool overlayIsBridge =
             cell->overlayResource.overlayKind == "bridge";
         const bool overlayIsHighBridge =
             isHighBridgeOverlayFact(overlay);

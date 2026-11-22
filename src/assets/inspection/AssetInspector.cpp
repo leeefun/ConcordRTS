@@ -1,4 +1,5 @@
 #include "assets/inspection/AssetInspector.h"
+#include "assets/codecs/PalDecoder.h"
 
 #include "data/art/ArtDatabase.h"
 #include "core/io/IniFile.h"
@@ -1338,47 +1339,24 @@ void inspectPcxUnsupported(
     }
 }
 
-unsigned char scalePaletteChannel(unsigned char value, bool sixBitPalette) {
-    if (!sixBitPalette) {
-        return value;
-    }
-
-    return static_cast<unsigned char>(
-        (static_cast<unsigned int>(value) * 255U + 31U) / 63U
-    );
-}
-
 bool decodeRa2Palette(
     const std::vector<unsigned char>& bytes,
     std::vector<RgbColor>& colors,
     std::string& errorMessage
 ) {
-    if (bytes.size() != 768) {
+    concord::assets::PalRawPalette raw;
+    if (!concord::assets::decodePalBytes(
+            bytes, raw, concord::assets::PalLengthPolicy::Exact768)) {
         errorMessage = "PAL file must be exactly 768 bytes for 256 RGB colors.";
         return false;
     }
-
+    const auto decoded = concord::assets::mapPalColors(
+        raw, concord::assets::PalColorPolicy::RoundedSixBit);
     colors.clear();
     colors.reserve(256);
-
-    unsigned int maxChannel = 0;
-    for (const unsigned char value : bytes) {
-        maxChannel = std::max(maxChannel, static_cast<unsigned int>(value));
+    for (const auto& color : decoded) {
+        colors.push_back({color.r, color.g, color.b});
     }
-
-    const bool sixBitPalette = maxChannel <= 63;
-
-    for (std::size_t i = 0; i < 256; ++i) {
-        const std::size_t offset = i * 3;
-
-        RgbColor color;
-        color.red = scalePaletteChannel(bytes[offset], sixBitPalette);
-        color.green = scalePaletteChannel(bytes[offset + 1], sixBitPalette);
-        color.blue = scalePaletteChannel(bytes[offset + 2], sixBitPalette);
-
-        colors.push_back(color);
-    }
-
     return true;
 }
 
@@ -3762,11 +3740,6 @@ void appendUiCoverageFields(CapabilityReportState& state) {
         state.report,
         "uiPlacementPreviewFacts",
         "place.shp frames 0/1 crop y=30..58 to 60x29 green/red diamond in Java reference; MapFacts footprint iso diamonds are authoritative for legality and hit-test"
-    );
-    addField(
-        state.report,
-        "uiSidebarReferenceCheck",
-        "read-only refs agree sidec01/sidec02 containers carry sidebar frames; Java layout facts are reported for Renderer reference only; no runtime layout constants copied"
     );
 
     state.report.warnings.push_back(

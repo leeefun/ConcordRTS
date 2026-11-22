@@ -6,9 +6,11 @@
 #include "ui/network/RuntimeInternetMultiplayerMenu.h"
 #include "network/lockstep/RuntimeMultiplayerRuntimeBridge.h"
 #include "ui/skirmish/RuntimeSkirmishMenu.h"
+#include "ui/skirmish/RuntimeSkirmishSetup.h"
 #include "simulation/superweapons/SuperWeaponSystem.h"
 
 #include <iostream>
+#include <charconv>
 #include <string>
 
 #ifdef _WIN32
@@ -16,6 +18,15 @@
 #include <cstdlib>
 #include <io.h>
 #include <windows.h>
+#include "runtime/window/win32/RuntimeStartupRecoveryPromptWin32.h"
+#endif
+
+#ifdef _WIN32
+int runRuntimeLanMenuHostLifecycleSmoke(const RuntimeConfig&, const std::string&);
+#endif
+
+#ifdef _WIN32
+int runRuntimeInternetMenuHostLifecycleSmoke(const RuntimeConfig&, const std::string&);
 #endif
 
 namespace {
@@ -42,6 +53,8 @@ void enableRuntimeDpiAwareness() {
 }
 
 struct RuntimeCommandLine {
+    std::string skirmishWindow = "win32";
+    concord::presentation::FrameBackendOptions presentation;
     RuntimeConfigOverrides overrides;
     bool showHelp = false;
     bool smokeTest = false;
@@ -362,6 +375,41 @@ RuntimeCommandLine parseRuntimeCommandLine(int argc, char** argv) {
             continue;
         }
 
+        if (argument == "--frame-backend" || argument == "--skirmish-drawing" || argument == "--map-drawing") {
+            std::string value;
+            if (!readRequiredValue(argc, argv, index, argument, value, commandLine.errorMessage)) return commandLine;
+            using namespace concord::presentation;
+            FrameBackend backend=FrameBackend::Software;FrameDevice device=FrameDevice::Hardware;
+            if(value=="auto")backend=FrameBackend::Auto;
+            else if(value=="d3d11")backend=FrameBackend::D3D11;
+            else if(value=="d3d11-warp"){backend=FrameBackend::D3D11;device=FrameDevice::Warp;}
+            else if(value!="software"){commandLine.errorMessage=argument+" requires software, auto, d3d11 or d3d11-warp";return commandLine;}
+            if(argument=="--frame-backend"){commandLine.presentation.backend=backend;commandLine.presentation.device=device;}
+            else if(argument=="--map-drawing"){commandLine.presentation.mapBackend=backend;commandLine.presentation.mapDevice=device;}
+            else {commandLine.presentation.menuBackend=backend;commandLine.presentation.menuDevice=device;}
+            continue;
+        }
+        if(argument=="--frame-workers") {
+            std::string value;if(!readRequiredValue(argc,argv,index,argument,value,commandLine.errorMessage))return commandLine;
+            if(value!="0"&&value!="1"&&value!="2"&&value!="4"){commandLine.errorMessage="--frame-workers requires 0, 1, 2 or 4";return commandLine;}
+            commandLine.presentation.frameWorkers=static_cast<unsigned>(value[0]-'0');continue;
+        }
+        if(argument=="--gpu-budget-mib") {
+            std::string value;if(!readRequiredValue(argc,argv,index,argument,value,commandLine.errorMessage))return commandLine;
+            unsigned budget=0;const auto parsed=std::from_chars(value.data(),value.data()+value.size(),budget);
+            if(parsed.ec!=std::errc{}||parsed.ptr!=value.data()+value.size()||budget<32||budget>256){commandLine.errorMessage="--gpu-budget-mib requires an integer from 32 to 256";return commandLine;}
+            commandLine.presentation.gpuBudgetBytes=static_cast<std::uint64_t>(budget)*1024*1024;continue;
+        }
+        if (argument == "--skirmish-window") {
+            if (!readRequiredValue(argc, argv, index, "--skirmish-window",
+                    commandLine.skirmishWindow, commandLine.errorMessage)) return commandLine;
+            if (commandLine.skirmishWindow != "win32" && commandLine.skirmishWindow != "sdl3") {
+                commandLine.errorMessage = "--skirmish-window requires win32 or sdl3";
+                return commandLine;
+            }
+            continue;
+        }
+
         if (argument == "--skirmish-ui-smoke-test") {
             if (!readRequiredValue(
                     argc,
@@ -635,6 +683,12 @@ void printRuntimeHelp(const std::string& programName) {
     std::cout << "  --internet-menu-skin-smoke-test <bmp>\n";
     std::cout << "                         Validate and render the original WOL/observer/rank PCX skin.\n";
     std::cout << "  --skirmish-ui-smoke-test <bmp>\n";
+    std::cout << "  --skirmish-window <win32|sdl3>  Select the standalone skirmish window (game window stays Win32).\n";
+    std::cout << "  --frame-backend <software|auto|d3d11|d3d11-warp>  Main Win32 complete CPU-frame presentation; default software. WARP is a software device.\n";
+    std::cout << "  --skirmish-drawing <software|auto|d3d11|d3d11-warp>  Win32 lobby/map menu raster; default software. Other menu pages fall back to software.\n";
+    std::cout << "  --gpu-budget-mib <32..256>  GPU payload cap; default 256 MiB, OS budget may reduce it.\n";
+    std::cout << "  --frame-workers <0|1|2|4>  Optional map tile preparation; default 0 (reference).\n";
+    std::cout << "  --map-drawing <software|auto|d3d11|d3d11-warp> (default software)\n";
     std::cout << "                         Render and validate the interactive skirmish setup screen offscreen.\n";
     std::cout << "  --main-menu-ui-smoke-test <bmp>\n";
     std::cout << "                         Render and validate the original 800x600 Yuri's Revenge shell.\n";
@@ -654,13 +708,14 @@ void printRuntimeHelp(const std::string& programName) {
 }
 
 int runRuntimeWindowWithMultiplayerFailureRecovery(
-    const RuntimeConfig& config
+    const RuntimeConfig& config,
+    concord::presentation::FrameBackendOptions presentation
 ) {
     for (;;) {
         // A previous successful/menu-return session must not leak a stale
         // teardown fallback into the next match attempt.
         (void)consumeRuntimeMultiplayerVisibleFailure();
-        const int result = runRuntimeWindow(config);
+        const int result = runRuntimeWindow(config,false,std::unique_ptr<RuntimeMultiplayerRuntimeBridge>{},presentation);
         const std::optional<std::string> multiplayerFailure =
             consumeRuntimeMultiplayerVisibleFailure();
         if (result == 0 || !config.showMainMenu
@@ -672,13 +727,10 @@ int runRuntimeWindowWithMultiplayerFailureRecovery(
             formatRuntimeMultiplayerVisibleFailureMessage(
                 *multiplayerFailure
             );
-        const int choice = MessageBoxA(
-            nullptr,
-            message.c_str(),
-            "ConcordRTS Multiplayer",
-            MB_YESNO | MB_ICONERROR | MB_TASKMODAL
-        );
-        if (choice != IDYES) return result;
+        if (!requestRuntimeStartupRecoveryRetry(
+                runtimeStartupRecoveryPromptWin32(),
+                message
+            )) return result;
 #else
         std::cerr << formatRuntimeMultiplayerVisibleFailureMessage(
             *multiplayerFailure
@@ -708,6 +760,33 @@ int runRuntimeApplication(int argc, char** argv) {
         return 1;
     }
 
+    if(commandLine.skirmishWindow=="sdl3"&&(commandLine.presentation.backend==concord::presentation::FrameBackend::D3D11
+        ||commandLine.presentation.menuBackend==concord::presentation::FrameBackend::D3D11
+        ||commandLine.presentation.mapBackend==concord::presentation::FrameBackend::D3D11)){
+        std::cerr<<"Unsupported window/graphics combination: SDL3 x D3D11; SDL3 supports bitmap software frames only.\n";
+        return 1;
+    }
+    if(commandLine.presentation.backend==concord::presentation::FrameBackend::D3D11
+        &&commandLine.presentation.mapBackend==concord::presentation::FrameBackend::D3D11
+        &&commandLine.presentation.device!=commandLine.presentation.mapDevice){
+        std::cerr<<"Frame and map drawing must use the same device on the single window presenter.\n";return 1;
+    }
+    if(commandLine.presentation.backend==concord::presentation::FrameBackend::Auto
+        ||commandLine.presentation.menuBackend==concord::presentation::FrameBackend::Auto
+        ||commandLine.presentation.mapBackend==concord::presentation::FrameBackend::Auto)
+        std::cout<<"Frame backend requested=auto selected=software reason=reference-default-performance-gate gpuBudgetBytes="<<commandLine.presentation.gpuBudgetBytes<<"\n";
+#ifdef _WIN32
+    // The synchronous fixed-clock pixel fixture intentionally does not dispatch
+    // queued input/timers. Keep Windows from substituting a ghost HWND while
+    // its full-image oracles run; all actual visibility/pixel assertions remain.
+    const char* fixedFrameOutput=std::getenv("CONCORD_MAIN_FRAME_CONTRACT_OUTPUT");
+    const char* fixedFrameNoGhost=std::getenv("CONCORD_S42_DIAGNOSTIC_NO_GHOST");
+    if(commandLine.interactionSmokeTest&&fixedFrameOutput&&*fixedFrameOutput
+        &&fixedFrameNoGhost&&std::string(fixedFrameNoGhost)=="1") {
+        DisableProcessWindowsGhosting();
+        std::cout<<"S42 fixed-frame diagnostic ghosting=disabled process-only normal-startup=unchanged\n";
+    }
+#endif
     RuntimeConfig config = loadRuntimeConfig(commandLine.overrides);
     if (commandLine.skipMainMenu) {
         config.showMainMenu = false;
@@ -718,6 +797,18 @@ int runRuntimeApplication(int argc, char** argv) {
     }
 
     if (!commandLine.mainMenuUiSmokeOutput.empty()) {
+#ifdef _WIN32
+        if (const char* only = std::getenv("CONCORD_INTERNET_MENU_HOST_LIFECYCLE_ONLY")) {
+            if (std::string(only) != "1") { std::cerr << "Internet host lifecycle ONLY must be1\n"; return 1; }
+            return runRuntimeInternetMenuHostLifecycleSmoke(config, commandLine.mainMenuUiSmokeOutput);
+        }
+#endif
+#ifdef _WIN32
+        if (const char* only = std::getenv("CONCORD_LAN_MENU_HOST_LIFECYCLE_ONLY")) {
+            if (std::string(only) != "1") { std::cerr << "LAN host lifecycle ONLY must be1\n"; return 1; }
+            return runRuntimeLanMenuHostLifecycleSmoke(config, commandLine.mainMenuUiSmokeOutput);
+        }
+#endif
         return runRuntimeMainMenuSmokeTest(
             config,
             commandLine.mainMenuUiSmokeOutput
@@ -900,7 +991,16 @@ int runRuntimeApplication(int argc, char** argv) {
         return runRuntimeVoxelAtlasDump(config, commandLine.vxlAtlasObjects);
     }
 
-    return runRuntimeWindowWithMultiplayerFailureRecovery(config);
+    if (commandLine.skirmishWindow == "sdl3") {
+        std::string error;
+        const auto selection = runRuntimeSkirmishMenuSdl3(config, error);
+        if (!error.empty()) { std::cerr << "Skirmish window: " << error << '\n'; return 1; }
+        if (!selection.accepted) return 0;
+        applyRuntimeSkirmishSelection(config, selection);
+        config.showMainMenu = false;
+        config.showSkirmishMenu = false;
+    }
+    return runRuntimeWindowWithMultiplayerFailureRecovery(config,commandLine.presentation);
 }
 
 } // namespace

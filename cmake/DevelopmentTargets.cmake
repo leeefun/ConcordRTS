@@ -1,20 +1,17 @@
+if(CONCORD_PORTABLE_CORE)
+    include("${CMAKE_CURRENT_LIST_DIR}/CoreTargets.cmake")
+    return()
+endif()
+
 add_executable(concord_map_data_smoke
+    # W027 same production component, explicit ABI-profile library.
     tests/maps/MapDataSmoke.cpp
-    src/world/model/GameWorld.cpp
-    src/core/io/IniFile.cpp
-    src/data/maps/MapDatabase.cpp
-    src/data/rules/RulesDatabase.cpp
-    src/data/art/TheaterDatabase.cpp
 )
 target_include_directories(concord_map_data_smoke PRIVATE src)
 
 add_executable(concord_game_world_deterministic_hash_smoke
+    # W027 same production component, explicit ABI-profile library.
     tests/infrastructure/GameWorldDeterministicHashSmoke.cpp
-    src/world/model/GameWorld.cpp
-    src/core/io/IniFile.cpp
-    src/data/maps/MapDatabase.cpp
-    src/data/rules/RulesDatabase.cpp
-    src/data/art/TheaterDatabase.cpp
 )
 target_include_directories(
     concord_game_world_deterministic_hash_smoke PRIVATE src
@@ -48,6 +45,48 @@ add_executable(concord_runtime_map_package_smoke
 )
 target_include_directories(concord_runtime_map_package_smoke PRIVATE src)
 
+add_executable(concord_csf_codec_contract
+    tests/assets/CsfCodecContract.cpp
+)
+target_include_directories(concord_csf_codec_contract PRIVATE src)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_csf_codec_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+
+add_executable(concord_pal_decoder_contract
+    tests/infrastructure/PalDecoderContract.cpp
+    src/assets/codecs/PalDecoder.cpp
+)
+target_include_directories(concord_pal_decoder_contract PRIVATE src)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_pal_decoder_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+
+add_executable(concord_map_preview_resource_context_contract
+    tests/infrastructure/MapPreviewResourceContextContract.cpp
+    src/assets/preview/MapPreviewResourceContext.cpp
+)
+target_include_directories(concord_map_preview_resource_context_contract PRIVATE src)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_map_preview_resource_context_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+
+add_executable(concord_runtime_match_score_contract
+    tests/infrastructure/RuntimeMatchScoreContract.cpp
+    src/core/results/RuntimeMatchScore.cpp
+)
+target_include_directories(concord_runtime_match_score_contract PRIVATE src)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_runtime_match_score_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+
+# Stable leaf library profiles; all consumers above exist before this include.
+include(cmake/LeafModuleLibraries.cmake)
+include(cmake/ReplaySnapshotContracts.cmake)
+include(cmake/PlayerDefeatNoticeContracts.cmake)
+include(cmake/InputPixelValuesContracts.cmake)
+include(cmake/UiClockContracts.cmake)
+
 add_executable(concord_campaign_progress_smoke
     tests/campaign/CampaignProgressSmoke.cpp
     src/data/campaign/CampaignProgress.cpp
@@ -55,6 +94,15 @@ add_executable(concord_campaign_progress_smoke
     src/core/io/RuntimeAtomicFile.cpp
 )
 target_include_directories(concord_campaign_progress_smoke PRIVATE src)
+
+add_executable(concord_player_slot_role_contract tests/infrastructure/PlayerSlotRoleContract.cpp)
+target_include_directories(concord_player_slot_role_contract PRIVATE src)
+add_executable(concord_runtime_observer_contract tests/infrastructure/RuntimeObserverContract.cpp)
+target_include_directories(concord_runtime_observer_contract PRIVATE src)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_player_slot_role_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+    concord_target_compile_options(concord_runtime_observer_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
 
 add_executable(concord_campaign_map_selection_smoke
     tests/campaign/CampaignMapSelectionSmoke.cpp
@@ -312,6 +360,7 @@ add_executable(concord_runtime_atomic_file_smoke
     src/core/io/RuntimeAtomicFile.cpp
 )
 target_include_directories(concord_runtime_atomic_file_smoke PRIVATE src)
+include("${CMAKE_CURRENT_LIST_DIR}/AtomicFileContracts.cmake")
 
 add_executable(concord_spy_system_smoke
     tests/gameplay/RuntimeSpySystemSmoke.cpp
@@ -416,7 +465,7 @@ target_include_directories(
 
 add_executable(concord_lan_transport_smoke
     tests/multiplayer/RuntimeLanTransportSmoke.cpp
-    src/network/session/RuntimeLanTransport.cpp
+    # Same production provider, explicit S11 Contract dependency below.
 )
 target_include_directories(concord_lan_transport_smoke PRIVATE src)
 
@@ -431,20 +480,17 @@ add_executable(concord_multiplayer_protocol_smoke
 target_include_directories(concord_multiplayer_protocol_smoke PRIVATE src)
 
 add_executable(concord_multiplayer_gameplay_command_smoke
+    # W027 same production component, explicit ABI-profile library.
     tests/multiplayer/RuntimeMultiplayerGameplayCommandSmoke.cpp
-    src/network/lockstep/RuntimeMultiplayerGameplayCommand.cpp
 )
 target_include_directories(
     concord_multiplayer_gameplay_command_smoke PRIVATE src
 )
 
 add_executable(concord_multiplayer_lockstep_smoke
+    # W027 same production component, explicit ABI-profile library.
     tests/multiplayer/RuntimeMultiplayerLockstepSmoke.cpp
-    src/network/lockstep/RuntimeMultiplayerLockstep.cpp
-    src/network/lockstep/RuntimeMultiplayerGameplayCommand.cpp
-    src/network/session/RuntimeMultiplayerSessionSystem.cpp
-    src/network/protocol/RuntimeMultiplayerMatchSetup.cpp
-    src/network/snapshots/RuntimeMultiplayerSnapshotTransfer.cpp
+    # H073 explicit Contract SnapshotTransfer dependency below.
 )
 target_include_directories(
     concord_multiplayer_lockstep_smoke PRIVATE src
@@ -476,14 +522,14 @@ add_executable(concord_multiplayer_lan_flow_smoke
 target_include_directories(concord_multiplayer_lan_flow_smoke PRIVATE src)
 
 add_executable(concord_multiplayer_match_setup_smoke
+    # W027 same production component, explicit ABI-profile library.
     tests/multiplayer/RuntimeMultiplayerMatchSetupSmoke.cpp
-    src/network/protocol/RuntimeMultiplayerMatchSetup.cpp
 )
 target_include_directories(concord_multiplayer_match_setup_smoke PRIVATE src)
 
 add_executable(concord_multiplayer_snapshot_transfer_smoke
     tests/multiplayer/RuntimeMultiplayerSnapshotTransferSmoke.cpp
-    src/network/snapshots/RuntimeMultiplayerSnapshotTransfer.cpp
+    # H073 explicit Contract SnapshotTransfer dependency below.
 )
 target_include_directories(
     concord_multiplayer_snapshot_transfer_smoke PRIVATE src
@@ -491,7 +537,7 @@ target_include_directories(
 
 add_executable(concord_multiplayer_compatibility_fingerprint_smoke
     tests/multiplayer/RuntimeMultiplayerCompatibilityFingerprintSmoke.cpp
-    src/network/maps/RuntimeMultiplayerCompatibilityFingerprint.cpp
+    # H074 explicit Contract Fingerprint dependency below.
 )
 target_include_directories(
     concord_multiplayer_compatibility_fingerprint_smoke PRIVATE src
@@ -500,6 +546,8 @@ target_include_directories(
 add_executable(concord_runtime_config_smoke
     tests/infrastructure/RuntimeConfigSmoke.cpp
     src/runtime/config/RuntimeConfig.cpp
+    src/runtime/config/RuntimeConfigPaths.cpp
+    src/core/io/RuntimeExecutableDirectory.cpp
     src/runtime/campaign/RuntimeCampaignDataSource.cpp
     src/ui/settings/RuntimeSettings.cpp
     src/core/io/RuntimeAtomicFile.cpp
@@ -511,6 +559,11 @@ target_include_directories(concord_runtime_config_smoke PRIVATE src)
 if(CONCORD_MSVC_FRONTEND)
     concord_target_compile_options(concord_runtime_config_smoke PRIVATE /utf-8 /FS /W4 /permissive-)
 endif()
+
+add_subdirectory(tests/infrastructure/file_path)
+add_subdirectory(tests/infrastructure/resource_path)
+add_subdirectory(tests/audio/path_contract)
+add_subdirectory(tests/assets/movie_path)
 
 add_executable(concord_multiplayer_launch_config_smoke
     tests/multiplayer/RuntimeMultiplayerLaunchConfigSmoke.cpp
@@ -668,7 +721,6 @@ target_include_directories(
 
 add_executable(concord_internet_tls_transport_smoke
     tests/internet/RuntimeInternetTlsTransportSmoke.cpp
-    src/network/transport/RuntimeInternetTlsTransport.cpp
 )
 target_include_directories(
     concord_internet_tls_transport_smoke PRIVATE src
@@ -781,3 +833,218 @@ if(CONCORD_MSVC_FRONTEND)
     concord_target_compile_options(concord_multiplayer_menu_smoke PRIVATE /wd4702)
 endif()
 
+
+add_executable(concord_shp_codec_contract
+    tests/assets/ShpCodecContract.cpp
+    src/assets/codecs/ShpCodec.cpp
+)
+target_include_directories(concord_shp_codec_contract PRIVATE src)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_shp_codec_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+# Independent rewrite test: isolate its unused Windows default libraries.
+add_subdirectory(tests/rendering/auxiliary_animation_contract)
+
+include(cmake/SelectionKeyContracts.cmake)
+
+include(cmake/TeamKeyContracts.cmake)
+
+include(cmake/LocalNavigationContracts.cmake)
+
+include(cmake/ReferencePresentationContracts.cmake)
+
+include(cmake/ReferenceCommunicationContracts.cmake)
+
+include(cmake/PlanningFactoryKeyContracts.cmake)
+
+include(cmake/CameraKeyContracts.cmake)
+
+include(cmake/MenuKeyContracts.cmake)
+include(cmake/SessionKeyContracts.cmake)
+
+include("${CMAKE_SOURCE_DIR}/cmake/KeyboardRouterContracts.cmake")
+
+include("${CMAKE_SOURCE_DIR}/cmake/KeyboardIngressContracts.cmake")
+
+include(cmake/ChatTextContracts.cmake)
+include(cmake/NavigationTerrainQueryContracts.cmake)
+
+include(cmake/TmpTerrainContracts.cmake)
+
+include(cmake/MapRightPointerContracts.cmake)
+
+# W010-02: same production left pointer policy and window-free contract.
+include(cmake/MapLeftPointerContracts.cmake)
+include(cmake/PointerIngressContracts.cmake)
+
+include(cmake/CursorControllerContracts.cmake)
+
+include(cmake/InputCancellationContracts.cmake)
+# S20: keep the legacy diagnostic entry in its own compilation unit.
+target_sources(concord_special_mechanisms_smoke PRIVATE
+    src/simulation/abilities/unit_special/diagnostics/RuntimeSpecialMechanismsSmoke.cpp
+)
+
+# S21: the TimedBomb owner is compiled separately by this actual consumer.
+target_sources(concord_special_mechanisms_smoke PRIVATE src/simulation/abilities/unit_special/RuntimeTimedBomb.cpp)
+
+# S22: candidate generation has an explicit source owner in every existing queue target.
+target_sources(concord_path_request_queue_performance_smoke PRIVATE src/simulation/navigation/pathfinding/PathGoalCandidates.cpp)
+
+# S23-01: explicit existing consumers share the independent production loader.
+foreach(s23_production_rules_owner IN ITEMS
+    concord_path_request_queue_performance_smoke
+    concord_rules_special_features_smoke
+    concord_rules_poison_policy_smoke
+    concord_mod_extensions_smoke
+    concord_screen_shake_smoke
+    concord_rules_pad_aircraft_smoke
+    concord_rules_production_smoke
+    concord_rules_lookup_dispatch_smoke
+    concord_rules_overlay_identity_smoke
+    concord_rules_crate_smoke
+    concord_art_firing_sequence_smoke
+    concord_particle_system_smoke
+    concord_garrison_system_smoke
+    concord_repair_depot_system_smoke
+    concord_grinding_system_smoke
+    concord_aircraft_service_system_smoke
+    concord_gate_system_smoke
+    concord_power_audio_feedback_smoke
+    concord_production_lanes_smoke
+    concord_spy_system_smoke
+    concord_death_weapon_system_smoke
+    concord_special_mechanisms_smoke
+    concord_special_building_system_smoke
+    concord_hospital_armory_mod_compat_smoke
+    concord_multiplayer_menu_smoke
+)
+    target_sources(${s23_production_rules_owner} PRIVATE src/data/rules/ProductionRulesLoader.cpp)
+endforeach()
+unset(s23_production_rules_owner)
+
+
+# S25: the same production video owner, independently linked without menus/Shell.
+add_executable(concord_bink_playback_service_contract
+    tests/assets/BinkPlaybackServiceContract.cpp
+    src/assets/video/BinkPlaybackService.cpp
+    src/assets/video/BinkPlaybackPaths.cpp
+    src/core/io/RuntimeExecutableDirectory.cpp
+)
+target_include_directories(concord_bink_playback_service_contract PRIVATE src)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_bink_playback_service_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+
+# S26-01: explicit owners of the shared LAN session, including existing bridge contracts.
+foreach(s26_lobby_map_owner IN ITEMS
+    concord_runtime
+    concord_multiplayer_lan_flow_smoke
+    concord_multiplayer_runtime_bridge_smoke
+    concord_multiplayer_two_process_smoke
+    concord_multiplayer_lobby_flow_smoke
+    concord_internet_lobby_flow_smoke
+    concord_internet_tcp_tunnel_proxy_smoke
+    concord_internet_service_lobby_e2e
+    concord_selection_key_bridge_smoke
+    concord_reference_communication_bridge_smoke
+    concord_planning_factory_key_bridge_smoke
+    concord_chat_text_bridge_smoke
+)
+    target_sources(${s26_lobby_map_owner} PRIVATE src/network/lobby/RuntimeMultiplayerLobbyMapTransfer.cpp)
+endforeach()
+unset(s26_lobby_map_owner)
+
+add_executable(concord_lobby_map_transfer_contract
+    tests/multiplayer/RuntimeLobbyMapTransferContract.cpp
+    src/network/lobby/RuntimeMultiplayerLobbyMapTransfer.cpp
+    src/network/maps/RuntimeMultiplayerMapTransfer.cpp
+    src/network/maps/RuntimeMultiplayerCompatibilityFingerprint.cpp
+    src/network/snapshots/RuntimeMultiplayerSnapshotTransfer.cpp
+)
+target_include_directories(concord_lobby_map_transfer_contract PRIVATE src)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_lobby_map_transfer_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+
+# S27-01: compile the existing replay envelope for the actual reset contract.
+# The recorder/viewer UI remains outside this recovery-only batch.
+target_sources(concord_runtime PRIVATE src/runtime/replay/RuntimeMatchReplay.cpp)
+add_executable(concord_match_replay_contract
+    tests/gameplay/RuntimeMatchReplaySmoke.cpp
+    src/runtime/replay/RuntimeMatchReplay.cpp
+    src/network/lockstep/RuntimeMultiplayerGameplayCommand.cpp
+    src/network/snapshots/RuntimeMultiplayerSnapshotTransfer.cpp
+)
+target_include_directories(concord_match_replay_contract PRIVATE src)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_match_replay_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+
+include(cmake/WindowLifecycleContracts.cmake)
+
+include("${CMAKE_CURRENT_LIST_DIR}/SkirmishControllerContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/Sdl3Window.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/WestwoodFontContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/MenuImageContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/ColorValueContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/SkirmishBitmapTextContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/MenuPixelSurfaceContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SkirmishBackBufferWin32Contracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SkirmishMusicContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/LanTransportProviders.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/SnapshotSessionContracts.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/SnapshotTransferLibraries.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/CompatibilityFingerprintLibraries.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ProductionCoreLibraries.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/ProductionSessionLibraries.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/TaskExecutorContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/GrandCannonPrewarmContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/PathGoalCandidateTaskContracts.cmake")
+
+# S38 is the sole complete-frame Presenter interface owner.
+include("${CMAKE_CURRENT_LIST_DIR}/SoftwareFrameContracts.cmake")
+
+# W005-05: native watch owner and isolated contract, without menu/device linkage.
+add_subdirectory(tests/infrastructure/menu_resource_watch)
+
+include("${CMAKE_CURRENT_LIST_DIR}/MainBitmapTextContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/ResultBitmapTextContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/MainBmpContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/MainSystemFontContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/SkirmishSystemFontContracts.cmake")
+
+include(cmake/CampaignSystemFontContracts.cmake)
+
+include(cmake/MatchResultSystemFontContracts.cmake)
+
+include(cmake/CampaignScoreSystemFontContracts.cmake)
+
+include(cmake/MainVideoFooterFontContracts.cmake)
+
+include(cmake/HudSystemFontContracts.cmake)
+include("${CMAKE_CURRENT_LIST_DIR}/InternetSkinDrawingContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/MainMenuSurfaceContracts.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/CampaignMenuSurfaceContracts.cmake")
+
+# W024 native certificate/credential oracle reuses the existing provider owner.
+target_link_libraries(concord_internet_tls_transport_smoke PRIVATE concord_internet_service_host_core)
+
+# W025 system source keeps its own formal profile providers.
+include("${CMAKE_CURRENT_LIST_DIR}/SystemSecureBytesProviders.cmake")
+
+include("${CMAKE_CURRENT_LIST_DIR}/ServiceProcessContracts.cmake")

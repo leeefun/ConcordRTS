@@ -59,7 +59,7 @@ std::string base64(const Bytes& bytes) {
 // initializes navigation and economy. It preserves loaded assets and UI handles.
 // All per-unit simulation systems remain enabled; only the source map's scripts,
 // starting army, opponents and random crate spawns are excluded from the fixture.
-bool prepareRuntimeMassMovementWorld(RuntimeWindowState& state, int unitCount,
+bool prepareRuntimeMassMovementWorld(RuntimeProductionHostState& state, int unitCount,
     std::vector<int>& unitIds, std::string& error, bool choke = false, bool mixed = false,
     bool battle = false, int mapWidth = 96, int mapHeight = 64, bool playerScene = false,
     bool mixedRoster = false, bool vehicleOnly = false, int vehicleRosterOffset = 0) {
@@ -212,6 +212,16 @@ bool prepareRuntimeMassMovementWorld(RuntimeWindowState& state, int unitCount,
     text << "[IsoMapPack5]\n";
     for (std::size_t at = 0; at < packed.size(); at += 70)
         text << at / 70 + 1 << '=' << packed.substr(at, 70) << '\n';
+    // S33 records the exact deterministic fixture, once per opted-in run.
+    // This is before warmup and never affects commands or measured ticks.
+    if (const char* outputPath = std::getenv("CONCORD_LIVE_BENCHMARK_GENERATED_MAP")) {
+        if (std::filesystem::exists(outputPath)) return fail("generated map output already exists");
+        std::ofstream output(outputPath, std::ios::binary);
+        output << text.str();
+        output.close();
+        if (!output) return fail("could not record generated benchmark map");
+        std::cout << "Live generated map: path=" << outputPath << '\n';
+    }
     IniFile ini;
     MapDatabase map;
     GameWorld world;

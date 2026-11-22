@@ -1,5 +1,10 @@
 include("${CMAKE_CURRENT_LIST_DIR}/CompilerContract.cmake")
 
+if(CONCORD_PORTABLE_CORE)
+    include("${CMAKE_CURRENT_LIST_DIR}/CxxContractDefaults.cmake")
+    return()
+endif()
+
 add_executable(concord_missile_acceleration_smoke tests/gameplay/RuntimeMissileAccelerationSmoke.cpp)
 target_include_directories(concord_missile_acceleration_smoke PRIVATE src)
 target_compile_features(concord_missile_acceleration_smoke PRIVATE cxx_std_20)
@@ -158,24 +163,15 @@ target_include_directories(concord_building_economy_smoke PRIVATE src)
 target_compile_features(concord_building_economy_smoke PRIVATE cxx_std_20)
 
 add_executable(concord_superweapon_smoke tests/gameplay/SuperWeaponSmoke.cpp
-    src/simulation/superweapons/SuperWeaponSystem.cpp src/data/rules/RulesDatabase.cpp src/core/io/IniFile.cpp
-    src/simulation/production/RuntimeFactoryDeliveryState.cpp)
+      
+    )
 target_include_directories(concord_superweapon_smoke PRIVATE src)
 target_compile_features(concord_superweapon_smoke PRIVATE cxx_std_20)
 if(CONCORD_MSVC_FRONTEND)
     concord_target_compile_options(concord_superweapon_smoke PRIVATE /utf-8 /FS)
 endif()
 
-if(CONCORD_MSVC_FRONTEND)
-    # /RTC1 cannot be combined with the optimized playable Debug runtime.
-    # cl.exe adds it back only to the non-optimized command-line tool below.
-    # clang-cl has no /RTC1 implementation; its tool target reports that omission.
-    string(REPLACE "/RTC1" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
-endif()
-
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+include("${CMAKE_CURRENT_LIST_DIR}/CxxContractDefaults.cmake")
 
 add_executable(concord_multiplayer_resume_save_smoke
     tests/multiplayer/RuntimeMultiplayerResumeSaveSmoke.cpp src/network/snapshots/RuntimeMultiplayerResumeSave.cpp
@@ -196,3 +192,59 @@ if(CONCORD_MSVC_FRONTEND)
     concord_target_compile_options(concord_building_economy_smoke PRIVATE /utf-8 /FS)
 endif()
 
+
+# S15-01: one Chronosphere commit, also built by the actual runtime owner.
+add_executable(concord_chronosphere_relocation_contract
+    tests/gameplay/RuntimeChronosphereRelocationContract.cpp
+    src/simulation/superweapons/RuntimeChronosphereRelocation.cpp)
+target_include_directories(concord_chronosphere_relocation_contract PRIVATE src)
+target_compile_features(concord_chronosphere_relocation_contract PRIVATE cxx_std_20)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_chronosphere_relocation_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+
+# S16-01: compile the identical storage implementation without the runtime host.
+add_executable(concord_house_economy_context_contract
+    tests/gameplay/HouseEconomyContextContract.cpp
+    src/simulation/economy/HouseEconomyContext.cpp)
+target_include_directories(concord_house_economy_context_contract PRIVATE src)
+target_compile_features(concord_house_economy_context_contract PRIVATE cxx_std_20)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_house_economy_context_contract PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+# S18-01: the independent contract compiles the actual production codec.
+add_executable(concord_computer_mining_codec_contract
+    tests/infrastructure/RuntimeComputerMiningCodecContract.cpp
+    src/simulation/ai/RuntimeComputerMiningCodec.cpp
+    src/core/io/IniFile.cpp)
+target_include_directories(concord_computer_mining_codec_contract PRIVATE src)
+target_compile_features(concord_computer_mining_codec_contract PRIVATE cxx_std_20)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_computer_mining_codec_contract
+        PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+
+# S19-01: compile the same production stages, without the runtime host.
+add_executable(concord_economy_production_fixed_step_contract
+    tests/gameplay/RuntimeEconomyProductionFixedStepContract.cpp
+    tests/gameplay/RuntimeProductionFixedStepHeaderFirst.cpp
+    src/simulation/economy/RuntimeEconomyFixedStep.cpp
+    src/simulation/production/RuntimeProductionFixedStep.cpp
+    src/simulation/production/RuntimeProductionLanes.cpp)
+target_include_directories(concord_economy_production_fixed_step_contract PRIVATE src)
+target_compile_features(concord_economy_production_fixed_step_contract PRIVATE cxx_std_20)
+if(CONCORD_MSVC_FRONTEND)
+    concord_target_compile_options(concord_economy_production_fixed_step_contract
+        PRIVATE /utf-8 /W4 /WX /permissive-)
+endif()
+# S23-01: explicit existing consumers share the independent production loader.
+foreach(s23_production_rules_owner IN ITEMS
+    concord_mod_history_noop_smoke
+    concord_water_wake_history_smoke
+    concord_simulation_query_reuse_smoke
+    concord_random_map_smoke
+    concord_building_economy_smoke
+)
+    target_sources(${s23_production_rules_owner} PRIVATE src/data/rules/ProductionRulesLoader.cpp)
+endforeach()
+unset(s23_production_rules_owner)
