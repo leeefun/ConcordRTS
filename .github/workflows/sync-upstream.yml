@@ -64,8 +64,21 @@ jobs:
           fi
 
           echo "上游有新提交：${upstream_sha}"
-          if ! git merge --no-edit "${upstream_ref}"; then
+          # .gitattributes 声明 `*.cmd text eol=crlf`，而仓库里两个 .cmd 的 blob 本身就存了 CRLF：
+          # 检出后 git 会先规范化工作区内容再与索引比较，恒定判定为「已修改」，
+          # merge 便以 "Your local changes ... would be overwritten" 拒绝执行。
+          # .git/info/attributes 的优先级高于仓库内 .gitattributes，把 .cmd 改为按字节比较后，
+          # 行尾差异不再算改动；该覆盖只存在于运行器，不改仓库内容。
+          printf '*.cmd -text\n' >> .git/info/attributes
+          git update-index --refresh || true
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::检出后仍存在未提交改动，无法安全合并："
+            git status --porcelain
+            exit 1
+          fi
+          if ! git merge --no-edit -X renormalize "${upstream_ref}"; then
             git merge --abort || true
+            git status --porcelain
             echo "::error::与上游合并冲突。请在本机把 ${UPSTREAM_REPOSITORY}/${UPSTREAM_BRANCH} 合入本仓库 ${TARGET_BRANCH} 并解决冲突后重新运行。"
             exit 1
           fi
